@@ -19,18 +19,15 @@
     const { useState, useCallback, useRef } = React;
 
     // ─── API Configuration ───────────────────────────────────────────────────────
-    // For local dev: the API key is entered in the UI and sent via a CORS proxy.
-    // For production: replace callAnthropic() with a fetch to YOUR backend endpoint
-    // that holds the key server-side (e.g. a Vercel/Netlify serverless function).
-
+    const API_KEY = "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";
     const CORS_PROXY = "https://corsproxy.io/?";
 
-    async function callAnthropic(apiKey, body) {
+    async function callAnthropic(body) {
       const res = await fetch(CORS_PROXY + encodeURIComponent("https://api.anthropic.com/v1/messages"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-api-key": apiKey,
+          "x-api-key": API_KEY,
           "anthropic-version": "2023-06-01",
         },
         body: JSON.stringify(body),
@@ -43,7 +40,7 @@
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────────
-    const STEPS = ["setup", "upload", "analysis", "pricing", "proposal"];
+    const STEPS = ["upload", "analysis", "pricing", "proposal"];
 
     const formatCurrency = (n) =>
       new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(n || 0);
@@ -63,8 +60,7 @@
 
     // ─── Main Component ──────────────────────────────────────────────────────────
     function PaymentProposalTool() {
-      const [apiKey, setApiKey] = useState(localStorage.getItem("clearrate_api_key") || "");
-      const [step, setStep] = useState(apiKey ? "upload" : "setup");
+      const [step, setStep] = useState("upload");
       const [file, setFile] = useState(null);
       const [fileData, setFileData] = useState(null);
       const [loading, setLoading] = useState(false);
@@ -75,13 +71,6 @@
       const [proposal, setProposal] = useState(null);
       const [dragOver, setDragOver] = useState(false);
       const fileRef = useRef();
-
-      const saveKey = () => {
-        if (apiKey.trim()) {
-          localStorage.setItem("clearrate_api_key", apiKey.trim());
-          setStep("upload");
-        }
-      };
 
       // ── File Handling ──
       const handleFile = (f) => {
@@ -99,7 +88,7 @@
 
       // ── Step 1: Analyze Statement ──
       const analyzeStatement = async () => {
-        if (!fileData || !apiKey) return;
+        if (!fileData) return;
         setLoading(true);
         setLoadingMsg("Analyzing your statement with AI...");
 
@@ -153,7 +142,7 @@ If you cannot find exact values, make educated estimates based on industry avera
         ];
 
         try {
-          const data = await callAnthropic(apiKey, {
+          const data = await callAnthropic({
             model: "claude-sonnet-4-20250514",
             max_tokens: 1000,
             messages: [{ role: "user", content: userContent }],
@@ -177,7 +166,7 @@ If you cannot find exact values, make educated estimates based on industry avera
 
       // ── Step 3: Generate Proposal ──
       const generateProposal = async () => {
-        if (!analysis || !pricingModel || !apiKey) return;
+        if (!analysis || !pricingModel) return;
         setLoading(true);
         setLoadingMsg("Generating your proposal...");
 
@@ -237,7 +226,7 @@ Return ONLY a JSON object (no markdown):
 Be precise with calculations. The ARR (my revenue) should equal: targetMargin * annualVolume + (perTxn * annualTransactions). Savings = current fees - proposed fees.`;
 
         try {
-          const data = await callAnthropic(apiKey, {
+          const data = await callAnthropic({
             model: "claude-sonnet-4-20250514",
             max_tokens: 1000,
             messages: [{ role: "user", content: prompt }],
@@ -291,14 +280,6 @@ Be precise with calculations. The ARR (my revenue) should equal: targetMargin * 
                   </div>
                 ))}
               </nav>
-              {step !== "setup" && (
-                <button
-                  style={{ ...styles.btn, ...styles.btnGhost, padding: "6px 14px", fontSize: 11 }}
-                  onClick={() => { localStorage.removeItem("clearrate_api_key"); setApiKey(""); setStep("setup"); }}
-                >
-                  Change API Key
-                </button>
-              )}
             </div>
           </header>
 
@@ -309,52 +290,6 @@ Be precise with calculations. The ARR (my revenue) should equal: targetMargin * 
                 <div style={styles.loadingCard}>
                   <div style={styles.spinner} className="spin" />
                   <p style={styles.loadingText}>{loadingMsg}</p>
-                </div>
-              </div>
-            )}
-
-            {/* ══ STEP 0: API KEY SETUP ══ */}
-            {step === "setup" && (
-              <div style={styles.panel}>
-                <h1 style={styles.h1}>Connect to Claude AI</h1>
-                <p style={styles.sub}>
-                  Enter your Anthropic API key to power the statement analysis and proposal generation.
-                  Your key is stored locally in your browser and never sent to any server other than Anthropic's API.
-                </p>
-
-                <div style={{ ...styles.dropzone, border: `2px solid ${T.cardBorder}`, cursor: "default" }}>
-                  <label style={{ fontSize: 12, color: T.muted, letterSpacing: 1, textTransform: "uppercase", display: "block", marginBottom: 12 }}>
-                    Anthropic API Key
-                  </label>
-                  <input
-                    type="password"
-                    value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
-                    placeholder="sk-ant-..."
-                    onKeyDown={(e) => e.key === "Enter" && saveKey()}
-                    style={{
-                      width: "100%", maxWidth: 500, padding: "14px 18px", background: T.bg,
-                      border: `1px solid ${T.cardBorder}`, borderRadius: 8, color: T.white,
-                      fontFamily: "inherit", fontSize: 15, outline: "none",
-                    }}
-                  />
-                  <p style={{ fontSize: 12, color: T.muted, marginTop: 12 }}>
-                    Get your key at{" "}
-                    <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener"
-                      style={{ color: T.accent, textDecoration: "none" }}>
-                      console.anthropic.com/settings/keys
-                    </a>
-                  </p>
-                </div>
-
-                <button style={{ ...styles.btn, ...styles.btnPrimary, opacity: apiKey.trim() ? 1 : 0.4 }} disabled={!apiKey.trim()} onClick={saveKey}>
-                  Continue to Upload {"\u2192"}
-                </button>
-
-                <div style={{ ...styles.notesBox, marginTop: 32 }}>
-                  <strong>Security note:</strong> For production use, you should move the API key to a backend
-                  server/serverless function so it is never exposed in the browser. This local mode is for
-                  development and personal use only.
                 </div>
               </div>
             )}
