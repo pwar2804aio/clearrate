@@ -62,7 +62,8 @@
     }
 
     function extractDealId(url) {
-      const match = url.match(/deal\/(\d+)/);
+      // Match /deal/123 or /record/0-3/123 (0-3 = deals in HubSpot)
+      const match = url.match(/(?:deal|record\/0-3)\/(\d+)/);
       return match ? match[1] : null;
     }
 
