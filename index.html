@@ -271,7 +271,7 @@ If you cannot find exact values, make educated estimates based on industry avera
 
         try {
           const data = await callAnthropic(apiKeys.anthropicKey, {
-            model: "claude-3-haiku-20240307",
+            model: "claude-sonnet-4-20250514",
             max_tokens: 1000,
             messages: [{ role: "user", content: userContent }],
           });
@@ -355,7 +355,7 @@ Be precise with calculations. The ARR (my revenue) should equal: targetMargin * 
 
         try {
           const data = await callAnthropic(apiKeys.anthropicKey, {
-            model: "claude-3-haiku-20240307",
+            model: "claude-sonnet-4-20250514",
             max_tokens: 1000,
             messages: [{ role: "user", content: prompt }],
           });
