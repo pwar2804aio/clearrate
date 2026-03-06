@@ -1,0 +1,940 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ClearRate Proposal Engine</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0f1e; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" data-type="module">
+    const { useState, useCallback, useRef } = React;
+
+    // ─── API Configuration ───────────────────────────────────────────────────────
+    // For local dev: the API key is entered in the UI and sent via a CORS proxy.
+    // For production: replace callAnthropic() with a fetch to YOUR backend endpoint
+    // that holds the key server-side (e.g. a Vercel/Netlify serverless function).
+
+    const CORS_PROXY = "https://corsproxy.io/?";
+
+    async function callAnthropic(apiKey, body) {
+      const res = await fetch(CORS_PROXY + encodeURIComponent("https://api.anthropic.com/v1/messages"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`API ${res.status}: ${err}`);
+      }
+      return res.json();
+    }
+
+    // ─── Helpers ─────────────────────────────────────────────────────────────────
+    const STEPS = ["setup", "upload", "analysis", "pricing", "proposal"];
+
+    const formatCurrency = (n) =>
+      new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(n || 0);
+
+    const formatPct = (n) => `${(n * 100).toFixed(4)}%`;
+    const formatPct2 = (n) => `${(n * 100).toFixed(2)}%`;
+
+    function parseAIAnalysis(text) {
+      try {
+        const clean = text.replace(/```json|```/g, "").trim();
+        const start = clean.indexOf("{");
+        const end = clean.lastIndexOf("}");
+        if (start !== -1 && end !== -1) return JSON.parse(clean.slice(start, end + 1));
+      } catch {}
+      return null;
+    }
+
+    // ─── Main Component ──────────────────────────────────────────────────────────
+    function PaymentProposalTool() {
+      const [apiKey, setApiKey] = useState(localStorage.getItem("clearrate_api_key") || "");
+      const [step, setStep] = useState(apiKey ? "upload" : "setup");
+      const [file, setFile] = useState(null);
+      const [fileData, setFileData] = useState(null);
+      const [loading, setLoading] = useState(false);
+      const [loadingMsg, setLoadingMsg] = useState("");
+      const [analysis, setAnalysis] = useState(null);
+      const [pricingModel, setPricingModel] = useState(null);
+      const [targetMargin, setTargetMargin] = useState(0.005);
+      const [proposal, setProposal] = useState(null);
+      const [dragOver, setDragOver] = useState(false);
+      const fileRef = useRef();
+
+      const saveKey = () => {
+        if (apiKey.trim()) {
+          localStorage.setItem("clearrate_api_key", apiKey.trim());
+          setStep("upload");
+        }
+      };
+
+      // ── File Handling ──
+      const handleFile = (f) => {
+        setFile(f);
+        const reader = new FileReader();
+        reader.onload = (e) => setFileData(e.target.result.split(",")[1]);
+        reader.readAsDataURL(f);
+      };
+
+      const onDrop = (e) => {
+        e.preventDefault();
+        setDragOver(false);
+        if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+      };
+
+      // ── Step 1: Analyze Statement ──
+      const analyzeStatement = async () => {
+        if (!fileData || !apiKey) return;
+        setLoading(true);
+        setLoadingMsg("Analyzing your statement with AI...");
+
+        const isImage = file.type.startsWith("image/");
+        const mediaType = isImage ? file.type : "application/pdf";
+
+        const userContent = [
+          {
+            type: isImage ? "image" : "document",
+            source: { type: "base64", media_type: mediaType, data: fileData },
+          },
+          {
+            type: "text",
+            text: `You are an expert payment processing analyst. Analyze this merchant statement and extract ALL financial data possible. Return ONLY a JSON object (no markdown, no explanation) with this exact structure:
+
+{
+  "merchantName": "string or Unknown",
+  "processingMonth": "string or Unknown",
+  "totalVolume": number (total $ processed),
+  "totalTransactions": number,
+  "totalFees": number (all fees paid),
+  "interchangeFees": number (interchange costs only, estimate if not broken out),
+  "processorFees": number (assessment + processor markup fees),
+  "otherFees": number (monthly fees, PCI, etc.),
+  "effectiveRate": number (totalFees/totalVolume as decimal e.g. 0.0245),
+  "interchangeRate": number (interchangeFees/totalVolume as decimal),
+  "processorMarkup": number (processorFees/totalVolume as decimal),
+  "averageTicket": number,
+  "cardPresentVolume": number (estimate if not stated),
+  "cardNotPresentVolume": number (estimate if not stated),
+  "cardPresentPct": number (decimal),
+  "cardNotPresentPct": number (decimal),
+  "visaVolume": number,
+  "mastercardVolume": number,
+  "amexVolume": number,
+  "discoverVolume": number,
+  "rewardCardPct": number (estimate, decimal),
+  "corporateCardPct": number (estimate, decimal),
+  "qualifiedRate": number (if tiered pricing, else null),
+  "midQualifiedRate": number (if tiered, else null),
+  "nonQualifiedRate": number (if tiered, else null),
+  "currentPricingModel": "tiered|interchange-plus|flat-rate|unknown",
+  "currentProcessorName": "string",
+  "annualVolume": number (monthly * 12 estimate),
+  "confidence": "high|medium|low",
+  "notes": "any important observations"
+}
+
+If you cannot find exact values, make educated estimates based on industry averages and mark confidence as low or medium. Never return null for numeric fields - use 0 if truly unknown.`,
+          },
+        ];
+
+        try {
+          const data = await callAnthropic(apiKey, {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 1000,
+            messages: [{ role: "user", content: userContent }],
+          });
+
+          const text = data.content?.map((b) => b.text || "").join("") || "";
+          const parsed = parseAIAnalysis(text);
+
+          if (parsed) {
+            parsed.currentMargin = (parsed.effectiveRate || 0) - (parsed.interchangeRate || 0);
+            setAnalysis(parsed);
+            setStep("analysis");
+          } else {
+            alert("Could not parse statement. Please try a clearer PDF or image.");
+          }
+        } catch (err) {
+          alert("Error analyzing statement: " + err.message);
+        }
+        setLoading(false);
+      };
+
+      // ── Step 3: Generate Proposal ──
+      const generateProposal = async () => {
+        if (!analysis || !pricingModel || !apiKey) return;
+        setLoading(true);
+        setLoadingMsg("Generating your proposal...");
+
+        const prompt = `You are a payment processing sales expert. Generate a detailed pricing proposal.
+
+MERCHANT DATA:
+${JSON.stringify(analysis, null, 2)}
+
+SELECTED PRICING MODEL: ${pricingModel}
+TARGET MARGIN (above interchange): ${(targetMargin * 100).toFixed(3)}%
+
+Return ONLY a JSON object (no markdown):
+{
+  "pricingModel": "${pricingModel}",
+  "proposedRates": {
+    ${pricingModel === "2-tier" ? `
+    "cardPresentRate": number (interchange avg for CP + targetMargin, as decimal),
+    "cardPresentPerTxn": number (per transaction fee, e.g. 0.10),
+    "cardNotPresentRate": number (interchange avg for CNP + targetMargin + risk premium, as decimal),
+    "cardNotPresentPerTxn": number
+    ` : pricingModel === "interchange-plus" ? `
+    "basisPoints": number (targetMargin in basis points above interchange, e.g. 25),
+    "perTransaction": number (per txn fee, e.g. 0.10),
+    "monthlyFee": number
+    ` : `
+    "flatRate": number (single rate covering interchange + margin, as decimal),
+    "perTransaction": number
+    `}
+  },
+  "projectedFees": {
+    "monthly": number,
+    "annual": number,
+    "effectiveRate": number (as decimal)
+  },
+  "currentFees": {
+    "monthly": number,
+    "annual": number,
+    "effectiveRate": number
+  },
+  "savings": {
+    "monthly": number,
+    "annual": number,
+    "savingsPct": number (decimal, how much % cheaper)
+  },
+  "myRevenue": {
+    "monthly": number (my margin above interchange),
+    "annual": number,
+    "arr": number
+  },
+  "sellingPoints": ["string", "string", "string", "string"],
+  "proposalSummary": "2-3 sentence compelling summary for merchant",
+  "breakdownTable": [
+    {"category": "string", "current": number, "proposed": number, "savings": number}
+  ]
+}
+
+Be precise with calculations. The ARR (my revenue) should equal: targetMargin * annualVolume + (perTxn * annualTransactions). Savings = current fees - proposed fees.`;
+
+        try {
+          const data = await callAnthropic(apiKey, {
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 1000,
+            messages: [{ role: "user", content: prompt }],
+          });
+
+          const text = data.content?.map((b) => b.text || "").join("") || "";
+          const parsed = parseAIAnalysis(text);
+          if (parsed) {
+            setProposal(parsed);
+            setStep("proposal");
+          } else {
+            alert("Could not generate proposal. Please try again.");
+          }
+        } catch (err) {
+          alert("Error: " + err.message);
+        }
+        setLoading(false);
+      };
+
+      // ─────────────────────────────────────────────────────────────────────────────
+      // RENDER
+      // ─────────────────────────────────────────────────────────────────────────────
+      return (
+        <div style={styles.root}>
+          <style>{css}</style>
+
+          {/* Header */}
+          <header style={styles.header}>
+            <div style={styles.headerInner}>
+              <div style={styles.logo}>
+                <span style={styles.logoMark}>{"\u25C8"}</span>
+                <span style={styles.logoText}>ClearRate</span>
+                <span style={styles.logoSub}>Proposal Engine</span>
+              </div>
+              <nav style={styles.steps}>
+                {[
+                  { id: "upload", label: "01 Upload" },
+                  { id: "analysis", label: "02 Analysis" },
+                  { id: "pricing", label: "03 Pricing" },
+                  { id: "proposal", label: "04 Proposal" },
+                ].map((s) => (
+                  <div
+                    key={s.id}
+                    style={{
+                      ...styles.stepItem,
+                      ...(step === s.id ? styles.stepActive : {}),
+                      ...(STEPS.indexOf(step) > STEPS.indexOf(s.id) ? styles.stepDone : {}),
+                    }}
+                  >
+                    {s.label}
+                  </div>
+                ))}
+              </nav>
+              {step !== "setup" && (
+                <button
+                  style={{ ...styles.btn, ...styles.btnGhost, padding: "6px 14px", fontSize: 11 }}
+                  onClick={() => { localStorage.removeItem("clearrate_api_key"); setApiKey(""); setStep("setup"); }}
+                >
+                  Change API Key
+                </button>
+              )}
+            </div>
+          </header>
+
+          <main style={styles.main}>
+            {/* ── LOADING OVERLAY ── */}
+            {loading && (
+              <div style={styles.loadingOverlay}>
+                <div style={styles.loadingCard}>
+                  <div style={styles.spinner} className="spin" />
+                  <p style={styles.loadingText}>{loadingMsg}</p>
+                </div>
+              </div>
+            )}
+
+            {/* ══ STEP 0: API KEY SETUP ══ */}
+            {step === "setup" && (
+              <div style={styles.panel}>
+                <h1 style={styles.h1}>Connect to Claude AI</h1>
+                <p style={styles.sub}>
+                  Enter your Anthropic API key to power the statement analysis and proposal generation.
+                  Your key is stored locally in your browser and never sent to any server other than Anthropic's API.
+                </p>
+
+                <div style={{ ...styles.dropzone, border: `2px solid ${T.cardBorder}`, cursor: "default" }}>
+                  <label style={{ fontSize: 12, color: T.muted, letterSpacing: 1, textTransform: "uppercase", display: "block", marginBottom: 12 }}>
+                    Anthropic API Key
+                  </label>
+                  <input
+                    type="password"
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    placeholder="sk-ant-..."
+                    onKeyDown={(e) => e.key === "Enter" && saveKey()}
+                    style={{
+                      width: "100%", maxWidth: 500, padding: "14px 18px", background: T.bg,
+                      border: `1px solid ${T.cardBorder}`, borderRadius: 8, color: T.white,
+                      fontFamily: "inherit", fontSize: 15, outline: "none",
+                    }}
+                  />
+                  <p style={{ fontSize: 12, color: T.muted, marginTop: 12 }}>
+                    Get your key at{" "}
+                    <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener"
+                      style={{ color: T.accent, textDecoration: "none" }}>
+                      console.anthropic.com/settings/keys
+                    </a>
+                  </p>
+                </div>
+
+                <button style={{ ...styles.btn, ...styles.btnPrimary, opacity: apiKey.trim() ? 1 : 0.4 }} disabled={!apiKey.trim()} onClick={saveKey}>
+                  Continue to Upload {"\u2192"}
+                </button>
+
+                <div style={{ ...styles.notesBox, marginTop: 32 }}>
+                  <strong>Security note:</strong> For production use, you should move the API key to a backend
+                  server/serverless function so it is never exposed in the browser. This local mode is for
+                  development and personal use only.
+                </div>
+              </div>
+            )}
+
+            {/* ══ STEP 1: UPLOAD ══ */}
+            {step === "upload" && (
+              <div style={styles.panel}>
+                <h1 style={styles.h1}>Upload Merchant Statement</h1>
+                <p style={styles.sub}>Upload a PDF or image of any merchant processing statement. Our AI will extract all fee data automatically.</p>
+
+                <div
+                  style={{ ...styles.dropzone, ...(dragOver ? styles.dropzoneActive : {}), ...(file ? styles.dropzoneDone : {}) }}
+                  onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                  onDragLeave={() => setDragOver(false)}
+                  onDrop={onDrop}
+                  onClick={() => fileRef.current.click()}
+                >
+                  <input ref={fileRef} type="file" accept=".pdf,image/*" style={{ display: "none" }} onChange={(e) => e.target.files[0] && handleFile(e.target.files[0])} />
+                  {file ? (
+                    <>
+                      <div style={styles.fileIcon}>{"\u2713"}</div>
+                      <p style={styles.fileName}>{file.name}</p>
+                      <p style={styles.fileMeta}>{(file.size / 1024).toFixed(1)} KB {"\u2022"} Click to replace</p>
+                    </>
+                  ) : (
+                    <>
+                      <div style={styles.uploadIcon}>{"\u2B06"}</div>
+                      <p style={styles.dropLabel}>Drop statement here or click to browse</p>
+                      <p style={styles.dropMeta}>PDF or image {"\u2022"} Any processor format accepted</p>
+                    </>
+                  )}
+                </div>
+
+                <div style={styles.supportedGrid}>
+                  {["Stripe", "Square", "First Data", "TSYS", "Heartland", "Worldpay", "Chase Paymentech", "Elavon"].map((p) => (
+                    <div key={p} style={styles.processorChip}>{p}</div>
+                  ))}
+                </div>
+
+                <button style={{ ...styles.btn, ...styles.btnPrimary, opacity: file ? 1 : 0.4 }} disabled={!file || loading} onClick={analyzeStatement}>
+                  Analyze Statement {"\u2192"}
+                </button>
+              </div>
+            )}
+
+            {/* ══ STEP 2: ANALYSIS ══ */}
+            {step === "analysis" && analysis && (
+              <div style={styles.panel}>
+                <div style={styles.panelHeader}>
+                  <div>
+                    <h1 style={styles.h1}>{analysis.merchantName || "Merchant"} {"\u2014"} Statement Analysis</h1>
+                    <p style={styles.sub}>{analysis.processingMonth} {"\u2022"} {analysis.currentProcessorName} {"\u2022"} Confidence: <span style={{ color: analysis.confidence === "high" ? "#22c55e" : analysis.confidence === "medium" ? "#f59e0b" : "#ef4444" }}>{analysis.confidence}</span></p>
+                  </div>
+                  <div style={styles.badge}>Current: {analysis.currentPricingModel?.replace("-", " ").toUpperCase()}</div>
+                </div>
+
+                {/* Key Metrics */}
+                <div style={styles.metricsGrid}>
+                  {[
+                    { label: "Monthly Volume", value: formatCurrency(analysis.totalVolume), accent: false },
+                    { label: "Total Fees Paid", value: formatCurrency(analysis.totalFees), accent: true },
+                    { label: "Effective Rate", value: formatPct2(analysis.effectiveRate), accent: true },
+                    { label: "Avg Ticket", value: formatCurrency(analysis.averageTicket), accent: false },
+                  ].map((m) => (
+                    <div key={m.label} style={{ ...styles.metricCard, ...(m.accent ? styles.metricCardAccent : {}) }}>
+                      <div style={styles.metricValue}>{m.value}</div>
+                      <div style={styles.metricLabel}>{m.label}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Fee Breakdown */}
+                <div style={styles.section}>
+                  <h2 style={styles.h2}>Fee Breakdown</h2>
+                  <div style={styles.feeTable}>
+                    {[
+                      { name: "Interchange (Network Cost)", amount: analysis.interchangeFees, rate: analysis.interchangeRate, note: "Pass-through \u2014 non-negotiable" },
+                      { name: "Processor Markup", amount: analysis.processorFees, rate: analysis.processorMarkup, note: "This is where savings are found" },
+                      { name: "Other Fees", amount: analysis.otherFees, rate: analysis.otherFees / analysis.totalVolume, note: "Monthly, PCI, misc." },
+                    ].map((row) => (
+                      <div key={row.name} style={styles.feeRow}>
+                        <div style={styles.feeName}>
+                          <span>{row.name}</span>
+                          <span style={styles.feeNote}>{row.note}</span>
+                        </div>
+                        <div style={styles.feeAmount}>{formatCurrency(row.amount)}</div>
+                        <div style={styles.feeRate}>{formatPct(row.rate || 0)}</div>
+                        <div style={styles.feeBar}>
+                          <div style={{ ...styles.feeBarFill, width: `${Math.min(((row.amount || 0) / (analysis.totalFees || 1)) * 100, 100)}%`, background: row.name.includes("Interchange") ? "#3b82f6" : row.name.includes("Processor") ? "#f97316" : "#6b7280" }} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Margin Above Interchange */}
+                <div style={styles.highlightBox}>
+                  <div style={styles.highlightLeft}>
+                    <div style={styles.highlightTitle}>Current Margin Above Interchange</div>
+                    <div style={styles.highlightValue}>{formatPct2(analysis.currentMargin)}</div>
+                    <div style={styles.highlightSub}>This is what your current processor earns on top of interchange costs</div>
+                  </div>
+                  <div style={styles.highlightRight}>
+                    <div style={styles.hlStat}><span style={styles.hlStatNum}>{formatCurrency(analysis.processorFees)}</span><span style={styles.hlStatLabel}>Monthly Processor Revenue</span></div>
+                    <div style={styles.hlStat}><span style={styles.hlStatNum}>{formatCurrency((analysis.processorFees || 0) * 12)}</span><span style={styles.hlStatLabel}>Annual Processor Revenue</span></div>
+                  </div>
+                </div>
+
+                {/* Volume Mix */}
+                <div style={styles.section}>
+                  <h2 style={styles.h2}>Volume Mix</h2>
+                  <div style={styles.mixGrid}>
+                    <div style={styles.mixCard}>
+                      <div style={styles.mixLabel}>Card Present</div>
+                      <div style={styles.mixPct}>{formatPct2(analysis.cardPresentPct || 0)}</div>
+                      <div style={styles.mixAmt}>{formatCurrency(analysis.cardPresentVolume)}</div>
+                    </div>
+                    <div style={styles.mixCard}>
+                      <div style={styles.mixLabel}>Card Not Present</div>
+                      <div style={styles.mixPct}>{formatPct2(analysis.cardNotPresentPct || 0)}</div>
+                      <div style={styles.mixAmt}>{formatCurrency(analysis.cardNotPresentVolume)}</div>
+                    </div>
+                    <div style={styles.mixCard}>
+                      <div style={styles.mixLabel}>Reward Cards</div>
+                      <div style={styles.mixPct}>{formatPct2(analysis.rewardCardPct || 0)}</div>
+                      <div style={styles.mixAmt}>{formatCurrency((analysis.totalVolume || 0) * (analysis.rewardCardPct || 0))}</div>
+                    </div>
+                    <div style={styles.mixCard}>
+                      <div style={styles.mixLabel}>Corporate Cards</div>
+                      <div style={styles.mixPct}>{formatPct2(analysis.corporateCardPct || 0)}</div>
+                      <div style={styles.mixAmt}>{formatCurrency((analysis.totalVolume || 0) * (analysis.corporateCardPct || 0))}</div>
+                    </div>
+                  </div>
+                </div>
+
+                {analysis.notes && (
+                  <div style={styles.notesBox}>
+                    <strong>AI Notes:</strong> {analysis.notes}
+                  </div>
+                )}
+
+                <div style={styles.btnRow}>
+                  <button style={{ ...styles.btn, ...styles.btnSecondary }} onClick={() => setStep("upload")}>{"\u2190"} Re-upload</button>
+                  <button style={{ ...styles.btn, ...styles.btnPrimary }} onClick={() => setStep("pricing")}>Select Pricing Model {"\u2192"}</button>
+                </div>
+              </div>
+            )}
+
+            {/* ══ STEP 3: PRICING ══ */}
+            {step === "pricing" && analysis && (
+              <div style={styles.panel}>
+                <h1 style={styles.h1}>Configure Your Proposal</h1>
+                <p style={styles.sub}>Select a pricing model and set your target margin above interchange to build the proposal.</p>
+
+                <div style={styles.section}>
+                  <h2 style={styles.h2}>Pricing Model</h2>
+                  <div style={styles.modelGrid}>
+                    {[
+                      {
+                        id: "2-tier",
+                        name: "2-Tier Pricing",
+                        icon: "\u2B1B",
+                        desc: "Separate rates for card-present and card-not-present transactions. Simple to explain, easy for merchants to budget.",
+                        pros: ["Simple for merchants to understand", "Predictable monthly costs", "Good for high CP volume"],
+                        cons: ["Less transparent", "May not suit mixed environments"],
+                      },
+                      {
+                        id: "interchange-plus",
+                        name: "Interchange Plus",
+                        icon: "\u25CE",
+                        desc: "Transparent interchange cost pass-through plus a fixed markup. Industry gold standard for transparency.",
+                        pros: ["Fully transparent", "Merchant sees exact costs", "Lower effective rate"],
+                        cons: ["Variable monthly bills", "More complex to explain"],
+                      },
+                      {
+                        id: "flat-rate",
+                        name: "Flat Rate",
+                        icon: "\u25AC",
+                        desc: "One simple rate for all card types. Easy to understand and predict, ideal for low-volume merchants.",
+                        pros: ["Simplest possible billing", "Easy to budget", "No surprises"],
+                        cons: ["May overpay on debit/low-reward", "Less competitive at scale"],
+                      },
+                    ].map((m) => (
+                      <div
+                        key={m.id}
+                        style={{ ...styles.modelCard, ...(pricingModel === m.id ? styles.modelCardSelected : {}) }}
+                        onClick={() => setPricingModel(m.id)}
+                      >
+                        <div style={styles.modelIcon}>{m.icon}</div>
+                        <div style={styles.modelName}>{m.name}</div>
+                        <div style={styles.modelDesc}>{m.desc}</div>
+                        <div style={styles.prosList}>
+                          {m.pros.map((p) => <div key={p} style={styles.pro}>{"\u2713"} {p}</div>)}
+                          {m.cons.map((c) => <div key={c} style={styles.con}>{"\u2013"} {c}</div>)}
+                        </div>
+                        {pricingModel === m.id && <div style={styles.selectedBadge}>Selected</div>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={styles.section}>
+                  <h2 style={styles.h2}>Target Margin Above Interchange</h2>
+                  <div style={styles.sliderSection}>
+                    <div style={styles.sliderDisplay}>
+                      <span style={styles.sliderBig}>{formatPct2(targetMargin)}</span>
+                      <span style={styles.sliderSub}>above interchange</span>
+                    </div>
+                    <input
+                      type="range" min="0.001" max="0.02" step="0.0005"
+                      value={targetMargin}
+                      onChange={(e) => setTargetMargin(parseFloat(e.target.value))}
+                      style={styles.slider}
+                    />
+                    <div style={styles.sliderRange}>
+                      <span>0.10% (aggressive)</span>
+                      <span>2.00% (premium)</span>
+                    </div>
+
+                    <div style={styles.marginPreview}>
+                      <div style={styles.mpItem}>
+                        <span style={styles.mpLabel}>Est. Monthly Revenue</span>
+                        <span style={styles.mpValue}>{formatCurrency((analysis.totalVolume || 0) * targetMargin)}</span>
+                      </div>
+                      <div style={styles.mpItem}>
+                        <span style={styles.mpLabel}>Est. ARR</span>
+                        <span style={styles.mpValue}>{formatCurrency((analysis.annualVolume || analysis.totalVolume * 12 || 0) * targetMargin)}</span>
+                      </div>
+                      <div style={styles.mpItem}>
+                        <span style={styles.mpLabel}>vs. Current Margin</span>
+                        <span style={{ ...styles.mpValue, color: targetMargin < (analysis.currentMargin || 0.015) ? "#22c55e" : "#f97316" }}>
+                          {targetMargin < (analysis.currentMargin || 0.015) ? "\u25BC " : "\u25B2 "}{formatPct2(Math.abs(targetMargin - (analysis.currentMargin || 0.015)))} {targetMargin < (analysis.currentMargin || 0.015) ? "lower than current" : "higher than current"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div style={styles.btnRow}>
+                  <button style={{ ...styles.btn, ...styles.btnSecondary }} onClick={() => setStep("analysis")}>{"\u2190"} Back to Analysis</button>
+                  <button style={{ ...styles.btn, ...styles.btnPrimary, opacity: pricingModel ? 1 : 0.4 }} disabled={!pricingModel || loading} onClick={generateProposal}>
+                    Generate Proposal {"\u2192"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* ══ STEP 4: PROPOSAL ══ */}
+            {step === "proposal" && proposal && analysis && (
+              <div style={styles.panel}>
+                <div style={styles.proposalHeader}>
+                  <div style={styles.proposalBadge}>MERCHANT PROPOSAL</div>
+                  <h1 style={styles.proposalTitle}>{analysis.merchantName || "Merchant"}</h1>
+                  <p style={styles.proposalSub}>{proposal.proposalSummary}</p>
+                </div>
+
+                {/* Savings Hero */}
+                <div style={styles.savingsHero}>
+                  <div style={styles.savingsMain}>
+                    <div style={styles.savingsLabel}>Annual Savings for Merchant</div>
+                    <div style={styles.savingsAmount}>{formatCurrency(proposal.savings?.annual || 0)}</div>
+                    <div style={styles.savingsPct}>{formatPct2(proposal.savings?.savingsPct || 0)} reduction in processing costs</div>
+                  </div>
+                  <div style={styles.savingsSide}>
+                    <div style={styles.ssItem}>
+                      <div style={styles.ssVal}>{formatCurrency(proposal.savings?.monthly || 0)}</div>
+                      <div style={styles.ssLbl}>Monthly Savings</div>
+                    </div>
+                    <div style={styles.ssDivider} />
+                    <div style={styles.ssItem}>
+                      <div style={styles.ssVal}>{formatPct2(proposal.projectedFees?.effectiveRate || 0)}</div>
+                      <div style={styles.ssLbl}>New Effective Rate</div>
+                    </div>
+                    <div style={styles.ssDivider} />
+                    <div style={styles.ssItem}>
+                      <div style={styles.ssVal}>{formatPct2(proposal.currentFees?.effectiveRate || analysis.effectiveRate || 0)}</div>
+                      <div style={styles.ssLbl}>Current Effective Rate</div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Proposed Rates */}
+                <div style={styles.section}>
+                  <h2 style={styles.h2}>Proposed {proposal.pricingModel === "2-tier" ? "2-Tier" : proposal.pricingModel === "interchange-plus" ? "Interchange Plus" : "Flat Rate"} Pricing</h2>
+                  <div style={styles.ratesGrid}>
+                    {proposal.pricingModel === "2-tier" && (
+                      <>
+                        <div style={styles.rateCard}>
+                          <div style={styles.rateLabel}>Card Present</div>
+                          <div style={styles.rateValue}>{formatPct2(proposal.proposedRates?.cardPresentRate || 0)}</div>
+                          <div style={styles.rateSub}>+ ${(proposal.proposedRates?.cardPresentPerTxn || 0).toFixed(2)} per transaction</div>
+                        </div>
+                        <div style={styles.rateCard}>
+                          <div style={styles.rateLabel}>Card Not Present</div>
+                          <div style={styles.rateValue}>{formatPct2(proposal.proposedRates?.cardNotPresentRate || 0)}</div>
+                          <div style={styles.rateSub}>+ ${(proposal.proposedRates?.cardNotPresentPerTxn || 0).toFixed(2)} per transaction</div>
+                        </div>
+                      </>
+                    )}
+                    {proposal.pricingModel === "interchange-plus" && (
+                      <>
+                        <div style={styles.rateCard}>
+                          <div style={styles.rateLabel}>Markup</div>
+                          <div style={styles.rateValue}>{proposal.proposedRates?.basisPoints || 0} BPS</div>
+                          <div style={styles.rateSub}>above interchange pass-through</div>
+                        </div>
+                        <div style={styles.rateCard}>
+                          <div style={styles.rateLabel}>Per Transaction</div>
+                          <div style={styles.rateValue}>${(proposal.proposedRates?.perTransaction || 0).toFixed(2)}</div>
+                          <div style={styles.rateSub}>flat authorization fee</div>
+                        </div>
+                        {proposal.proposedRates?.monthlyFee > 0 && (
+                          <div style={styles.rateCard}>
+                            <div style={styles.rateLabel}>Monthly Fee</div>
+                            <div style={styles.rateValue}>{formatCurrency(proposal.proposedRates?.monthlyFee)}</div>
+                            <div style={styles.rateSub}>platform & service fee</div>
+                          </div>
+                        )}
+                      </>
+                    )}
+                    {proposal.pricingModel === "flat-rate" && (
+                      <>
+                        <div style={styles.rateCard}>
+                          <div style={styles.rateLabel}>All Card Types</div>
+                          <div style={styles.rateValue}>{formatPct2(proposal.proposedRates?.flatRate || 0)}</div>
+                          <div style={styles.rateSub}>single flat rate, all cards</div>
+                        </div>
+                        <div style={styles.rateCard}>
+                          <div style={styles.rateLabel}>Per Transaction</div>
+                          <div style={styles.rateValue}>${(proposal.proposedRates?.perTransaction || 0).toFixed(2)}</div>
+                          <div style={styles.rateSub}>flat authorization fee</div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                {/* Fee Comparison Table */}
+                <div style={styles.section}>
+                  <h2 style={styles.h2}>Fee Comparison</h2>
+                  <div style={styles.compareTable}>
+                    <div style={styles.compareHeader}>
+                      <div style={styles.compareCell}>Category</div>
+                      <div style={styles.compareCell}>Current</div>
+                      <div style={styles.compareCell}>Proposed</div>
+                      <div style={{ ...styles.compareCell, color: "#22c55e" }}>Savings</div>
+                    </div>
+                    {(proposal.breakdownTable || [
+                      { category: "Monthly Processing Fees", current: analysis.totalFees, proposed: proposal.projectedFees?.monthly, savings: proposal.savings?.monthly },
+                      { category: "Annual Fees", current: analysis.totalFees * 12, proposed: proposal.projectedFees?.annual, savings: proposal.savings?.annual },
+                    ]).map((row, i) => (
+                      <div key={i} style={{ ...styles.compareRow, ...(i % 2 === 0 ? styles.compareRowAlt : {}) }}>
+                        <div style={styles.compareCell}>{row.category}</div>
+                        <div style={{ ...styles.compareCell, color: "#ef4444" }}>{formatCurrency(row.current)}</div>
+                        <div style={{ ...styles.compareCell, color: "#3b82f6" }}>{formatCurrency(row.proposed)}</div>
+                        <div style={{ ...styles.compareCell, color: "#22c55e", fontWeight: 700 }}>{formatCurrency(row.savings)}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* My Revenue / ARR */}
+                <div style={styles.arrBox}>
+                  <h2 style={{ ...styles.h2, color: "#f8fafc" }}>Your Revenue {"\u2014"} This Account</h2>
+                  <div style={styles.arrGrid}>
+                    <div style={styles.arrItem}>
+                      <div style={styles.arrVal}>{formatCurrency(proposal.myRevenue?.monthly || 0)}</div>
+                      <div style={styles.arrLbl}>Monthly Revenue</div>
+                    </div>
+                    <div style={styles.arrItem}>
+                      <div style={styles.arrVal}>{formatCurrency(proposal.myRevenue?.annual || 0)}</div>
+                      <div style={styles.arrLbl}>Annual Revenue</div>
+                    </div>
+                    <div style={{ ...styles.arrItem, ...styles.arrHighlight }}>
+                      <div style={{ ...styles.arrVal, fontSize: "2rem" }}>{formatCurrency(proposal.myRevenue?.arr || 0)}</div>
+                      <div style={styles.arrLbl}>ARR (Annual Recurring Revenue)</div>
+                    </div>
+                  </div>
+                  <div style={styles.arrNote}>Based on {formatPct2(targetMargin)} target margin on {formatCurrency(analysis.annualVolume || analysis.totalVolume * 12)} annual volume</div>
+                </div>
+
+                {/* Selling Points */}
+                {proposal.sellingPoints?.length > 0 && (
+                  <div style={styles.section}>
+                    <h2 style={styles.h2}>Key Value Points</h2>
+                    <div style={styles.vpGrid}>
+                      {proposal.sellingPoints.map((p, i) => (
+                        <div key={i} style={styles.vpCard}>
+                          <span style={styles.vpNum}>{String(i + 1).padStart(2, "0")}</span>
+                          <span style={styles.vpText}>{p}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div style={styles.btnRow}>
+                  <button style={{ ...styles.btn, ...styles.btnSecondary }} onClick={() => setStep("pricing")}>{"\u2190"} Adjust Pricing</button>
+                  <button style={{ ...styles.btn, ...styles.btnPrimary }} onClick={() => window.print()}>Print / Export Proposal</button>
+                  <button style={{ ...styles.btn, ...styles.btnGhost }} onClick={() => { setStep("upload"); setFile(null); setFileData(null); setAnalysis(null); setProposal(null); setPricingModel(null); }}>
+                    New Proposal
+                  </button>
+                </div>
+              </div>
+            )}
+          </main>
+        </div>
+      );
+    }
+
+    // ─── Styles ──────────────────────────────────────────────────────────────────
+    const T = {
+      bg: "#0a0f1e",
+      card: "#0f1628",
+      cardBorder: "#1e2d4a",
+      accent: "#0ea5e9",
+      accentGlow: "#0ea5e915",
+      gold: "#f59e0b",
+      green: "#22c55e",
+      red: "#ef4444",
+      text: "#e2e8f0",
+      muted: "#64748b",
+      white: "#f8fafc",
+    };
+
+    const styles = {
+      root: { background: T.bg, minHeight: "100vh", fontFamily: "'DM Mono', 'Fira Code', monospace", color: T.text },
+      header: { borderBottom: `1px solid ${T.cardBorder}`, background: `${T.card}cc`, backdropFilter: "blur(12px)", position: "sticky", top: 0, zIndex: 100 },
+      headerInner: { maxWidth: 1100, margin: "0 auto", padding: "0 24px", display: "flex", alignItems: "center", justifyContent: "space-between", height: 64 },
+      logo: { display: "flex", alignItems: "center", gap: 10 },
+      logoMark: { fontSize: 22, color: T.accent },
+      logoText: { fontWeight: 700, fontSize: 18, letterSpacing: 2, color: T.white, fontFamily: "'DM Mono', monospace" },
+      logoSub: { fontSize: 11, color: T.muted, letterSpacing: 3, textTransform: "uppercase", marginLeft: 4 },
+      steps: { display: "flex", gap: 4 },
+      stepItem: { padding: "4px 12px", borderRadius: 4, fontSize: 11, letterSpacing: 1, color: T.muted, textTransform: "uppercase" },
+      stepActive: { background: T.accentGlow, color: T.accent, border: `1px solid ${T.accent}40` },
+      stepDone: { color: T.green },
+      main: { maxWidth: 1100, margin: "0 auto", padding: "40px 24px 80px" },
+      panel: { animation: "fadeIn 0.3s ease" },
+      panelHeader: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 32, flexWrap: "wrap", gap: 16 },
+      badge: { background: T.accentGlow, border: `1px solid ${T.accent}40`, color: T.accent, padding: "6px 16px", borderRadius: 4, fontSize: 12, letterSpacing: 2, fontWeight: 700 },
+      h1: { fontSize: 28, fontWeight: 700, color: T.white, margin: "0 0 8px", letterSpacing: -0.5 },
+      h2: { fontSize: 15, fontWeight: 600, color: T.muted, margin: "0 0 16px", letterSpacing: 2, textTransform: "uppercase" },
+      sub: { color: T.muted, fontSize: 15, marginBottom: 32, lineHeight: 1.6 },
+      section: { marginBottom: 40 },
+      btnRow: { display: "flex", gap: 12, marginTop: 40, flexWrap: "wrap" },
+      btn: { padding: "12px 28px", borderRadius: 6, fontFamily: "inherit", fontWeight: 600, fontSize: 14, cursor: "pointer", border: "none", transition: "all 0.2s", letterSpacing: 0.5 },
+      btnPrimary: { background: T.accent, color: T.bg },
+      btnSecondary: { background: "transparent", color: T.accent, border: `1px solid ${T.accent}60` },
+      btnGhost: { background: "transparent", color: T.muted, border: `1px solid ${T.cardBorder}` },
+
+      dropzone: { border: `2px dashed ${T.cardBorder}`, borderRadius: 12, padding: "60px 40px", textAlign: "center", cursor: "pointer", transition: "all 0.2s", marginBottom: 24 },
+      dropzoneActive: { border: `2px dashed ${T.accent}`, background: T.accentGlow },
+      dropzoneDone: { border: `2px solid ${T.green}40`, background: "#052e1640" },
+      uploadIcon: { fontSize: 40, marginBottom: 16, color: T.muted },
+      dropLabel: { fontSize: 17, color: T.text, marginBottom: 8 },
+      dropMeta: { fontSize: 13, color: T.muted },
+      fileIcon: { fontSize: 40, marginBottom: 12, color: T.green },
+      fileName: { fontSize: 16, color: T.white, fontWeight: 600, marginBottom: 4 },
+      fileMeta: { fontSize: 13, color: T.muted },
+      supportedGrid: { display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 32 },
+      processorChip: { padding: "4px 12px", background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 4, fontSize: 12, color: T.muted },
+
+      metricsGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 16, marginBottom: 40 },
+      metricCard: { background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 10, padding: "24px 20px" },
+      metricCardAccent: { border: `1px solid ${T.accent}40`, background: T.accentGlow },
+      metricValue: { fontSize: 26, fontWeight: 700, color: T.white, marginBottom: 6 },
+      metricLabel: { fontSize: 12, color: T.muted, letterSpacing: 1, textTransform: "uppercase" },
+
+      feeTable: { background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 10, overflow: "hidden" },
+      feeRow: { display: "grid", gridTemplateColumns: "1fr 120px 100px 1fr", gap: 16, padding: "16px 24px", borderBottom: `1px solid ${T.cardBorder}`, alignItems: "center" },
+      feeName: { display: "flex", flexDirection: "column", gap: 2 },
+      feeNote: { fontSize: 11, color: T.muted },
+      feeAmount: { fontWeight: 600, color: T.white, textAlign: "right" },
+      feeRate: { color: T.muted, textAlign: "right", fontSize: 13 },
+      feeBar: { height: 6, background: "#1e2d4a", borderRadius: 3, overflow: "hidden" },
+      feeBarFill: { height: "100%", borderRadius: 3, transition: "width 0.6s ease" },
+
+      highlightBox: { background: `linear-gradient(135deg, #0ea5e912, #0f172a)`, border: `1px solid ${T.accent}40`, borderRadius: 12, padding: "28px 32px", display: "flex", gap: 40, alignItems: "center", flexWrap: "wrap", marginBottom: 40 },
+      highlightLeft: { flex: 1, minWidth: 200 },
+      highlightTitle: { fontSize: 12, color: T.muted, letterSpacing: 2, textTransform: "uppercase", marginBottom: 8 },
+      highlightValue: { fontSize: 42, fontWeight: 800, color: T.accent, fontFamily: "'DM Mono', monospace" },
+      highlightSub: { fontSize: 13, color: T.muted, marginTop: 8 },
+      highlightRight: { display: "flex", gap: 32 },
+      hlStat: { display: "flex", flexDirection: "column", gap: 4 },
+      hlStatNum: { fontSize: 20, fontWeight: 700, color: T.white },
+      hlStatLabel: { fontSize: 11, color: T.muted, letterSpacing: 1 },
+
+      mixGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 },
+      mixCard: { background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 8, padding: "20px 16px" },
+      mixLabel: { fontSize: 11, color: T.muted, letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 },
+      mixPct: { fontSize: 22, fontWeight: 700, color: T.white },
+      mixAmt: { fontSize: 13, color: T.muted, marginTop: 4 },
+
+      notesBox: { background: "#f59e0b10", border: "1px solid #f59e0b30", borderRadius: 8, padding: "16px 20px", fontSize: 14, color: T.muted, marginBottom: 24 },
+
+      modelGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16 },
+      modelCard: { background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 12, padding: "28px 24px", cursor: "pointer", transition: "all 0.2s", position: "relative" },
+      modelCardSelected: { border: `2px solid ${T.accent}`, background: T.accentGlow },
+      modelIcon: { fontSize: 28, marginBottom: 12 },
+      modelName: { fontSize: 17, fontWeight: 700, color: T.white, marginBottom: 8 },
+      modelDesc: { fontSize: 13, color: T.muted, lineHeight: 1.5, marginBottom: 16 },
+      prosList: { display: "flex", flexDirection: "column", gap: 4 },
+      pro: { fontSize: 12, color: T.green },
+      con: { fontSize: 12, color: T.muted },
+      selectedBadge: { position: "absolute", top: 12, right: 12, background: T.accent, color: T.bg, fontSize: 10, padding: "3px 10px", borderRadius: 20, fontWeight: 700, letterSpacing: 1 },
+
+      sliderSection: { background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 12, padding: "32px" },
+      sliderDisplay: { textAlign: "center", marginBottom: 24 },
+      sliderBig: { fontSize: 48, fontWeight: 800, color: T.accent, display: "block" },
+      sliderSub: { fontSize: 14, color: T.muted },
+      slider: { width: "100%", accentColor: T.accent, height: 6, cursor: "pointer" },
+      sliderRange: { display: "flex", justifyContent: "space-between", fontSize: 11, color: T.muted, marginTop: 8, marginBottom: 24 },
+      marginPreview: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 16, marginTop: 24 },
+      mpItem: { display: "flex", flexDirection: "column", gap: 4 },
+      mpLabel: { fontSize: 11, color: T.muted, letterSpacing: 1, textTransform: "uppercase" },
+      mpValue: { fontSize: 20, fontWeight: 700, color: T.white },
+
+      proposalHeader: { textAlign: "center", marginBottom: 48, padding: "40px 0" },
+      proposalBadge: { display: "inline-block", background: T.accentGlow, border: `1px solid ${T.accent}40`, color: T.accent, padding: "6px 20px", borderRadius: 20, fontSize: 11, letterSpacing: 3, marginBottom: 16 },
+      proposalTitle: { fontSize: 42, fontWeight: 800, color: T.white, margin: "0 0 16px", letterSpacing: -1 },
+      proposalSub: { fontSize: 16, color: T.muted, maxWidth: 600, margin: "0 auto", lineHeight: 1.7 },
+
+      savingsHero: { background: "linear-gradient(135deg, #052e16, #0a0f1e)", border: "1px solid #22c55e40", borderRadius: 16, padding: "40px", display: "flex", gap: 40, alignItems: "center", marginBottom: 48, flexWrap: "wrap" },
+      savingsMain: { flex: 1, minWidth: 240 },
+      savingsLabel: { fontSize: 12, color: T.green, letterSpacing: 2, textTransform: "uppercase", marginBottom: 12 },
+      savingsAmount: { fontSize: 56, fontWeight: 900, color: T.green, lineHeight: 1 },
+      savingsPct: { fontSize: 14, color: "#22c55e80", marginTop: 8 },
+      savingsSide: { display: "flex", gap: 24, alignItems: "center", flexWrap: "wrap" },
+      ssItem: { textAlign: "center" },
+      ssVal: { fontSize: 22, fontWeight: 700, color: T.white },
+      ssLbl: { fontSize: 11, color: T.muted, marginTop: 4 },
+      ssDivider: { width: 1, height: 40, background: T.cardBorder },
+
+      ratesGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 16 },
+      rateCard: { background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 10, padding: "24px 20px", textAlign: "center" },
+      rateLabel: { fontSize: 11, color: T.muted, letterSpacing: 2, textTransform: "uppercase", marginBottom: 12 },
+      rateValue: { fontSize: 32, fontWeight: 800, color: T.accent },
+      rateSub: { fontSize: 12, color: T.muted, marginTop: 8 },
+
+      compareTable: { background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 10, overflow: "hidden" },
+      compareHeader: { display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", padding: "12px 24px", background: "#1e2d4a", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: T.muted },
+      compareRow: { display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", padding: "16px 24px", borderBottom: `1px solid ${T.cardBorder}` },
+      compareRowAlt: { background: "#0f162810" },
+      compareCell: { fontSize: 14, color: T.text },
+
+      arrBox: { background: "linear-gradient(135deg, #1e1b0a, #0a0f1e)", border: "1px solid #f59e0b40", borderRadius: 16, padding: "36px", marginBottom: 40 },
+      arrGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 20, marginBottom: 16 },
+      arrItem: { textAlign: "center" },
+      arrHighlight: { background: "#f59e0b15", border: "1px solid #f59e0b40", borderRadius: 10, padding: "20px" },
+      arrVal: { fontSize: 28, fontWeight: 800, color: T.gold },
+      arrLbl: { fontSize: 12, color: T.muted, marginTop: 6, textTransform: "uppercase", letterSpacing: 1 },
+      arrNote: { fontSize: 12, color: T.muted, textAlign: "center" },
+
+      vpGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 },
+      vpCard: { background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 8, padding: "16px 20px", display: "flex", gap: 16, alignItems: "flex-start" },
+      vpNum: { fontSize: 20, fontWeight: 800, color: `${T.accent}60`, flexShrink: 0 },
+      vpText: { fontSize: 14, color: T.text, lineHeight: 1.5 },
+
+      loadingOverlay: { position: "fixed", inset: 0, background: "#0a0f1ecc", backdropFilter: "blur(8px)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center" },
+      loadingCard: { background: T.card, border: `1px solid ${T.cardBorder}`, borderRadius: 16, padding: "48px 64px", textAlign: "center" },
+      spinner: { width: 48, height: 48, border: `3px solid ${T.cardBorder}`, borderTop: `3px solid ${T.accent}`, borderRadius: "50%", margin: "0 auto 24px" },
+      loadingText: { color: T.muted, fontSize: 15 },
+    };
+
+    const css = `
+      @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap');
+      @keyframes fadeIn { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .spin { animation: spin 0.8s linear infinite; }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      input[type=range] { -webkit-appearance: none; appearance: none; background: #1e2d4a; border-radius: 4px; outline: none; }
+      input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 20px; height: 20px; background: #0ea5e9; border-radius: 50%; cursor: pointer; }
+      @media (max-width: 600px) { .steps { display: none !important; } }
+      @media print { header, .no-print { display: none; } }
+    `;
+
+    // ─── Mount ───────────────────────────────────────────────────────────────────
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<PaymentProposalTool />);
+  </script>
+</body>
+</html>
