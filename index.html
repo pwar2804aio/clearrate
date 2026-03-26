@@ -15,16 +15,11 @@
 <body>
   <div id="root"></div>
 
-  <!-- API key config — set once and stored in localStorage -->
+  <!-- API key config — loaded from localStorage -->
   <script>
     (function() {
       var saved = localStorage.getItem("cr_api_key");
-      if (saved) { window.__CR_API_KEY = saved; return; }
-      var key = prompt("Enter your Anthropic API key to use ClearRate:");
-      if (key && key.trim()) {
-        window.__CR_API_KEY = key.trim();
-        localStorage.setItem("cr_api_key", key.trim());
-      }
+      if (saved) { window.__CR_API_KEY = saved; }
     })();
   </script>
 
