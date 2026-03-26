@@ -1068,12 +1068,15 @@ Never use null for numeric fields — use 0. All rate fields must be decimal mul
       const parsed = parseJSON(data.content?.map(b=>b.text||"").join("")||"");
       if (parsed) {
         // Normalize rate fields to pure decimal multiplier (e.g. 6bps → 0.0006)
-        // AI commonly returns: integer bps (6), percentage decimal (0.6 for 0.06%), or correct decimal (0.0006)
+        // AI commonly returns bps as: integer (6), percent-decimal (0.06 for 0.06%=6bps),
+        // large decimal (0.6), or correct multiplier (0.0006).
+        // Realistic max acquirer processing fee is ~150bps = 0.015, so anything >= 0.02 is wrong.
         const normalizeBps = v => {
           if (!v || v === 0) return 0;
-          if (v >= 1)   return v / 10000;  // integer bps: 6 → 0.0006
-          if (v >= 0.5) return v / 1000;   // very high decimal like 0.6 → 0.0006
-          return v;                          // already a reasonable decimal
+          if (v >= 1)    return v / 10000;  // integer bps:          6    → 0.0006
+          if (v >= 0.5)  return v / 1000;   // very large decimal:   0.6  → 0.0006
+          if (v >= 0.02) return v / 100;    // percent-decimal form: 0.06 → 0.0006
+          return v;                          // already correct:      0.0006 ✓
         };
         const normalizeTier = t => ({...t, processingBps: normalizeBps(t.processingBps), schemeBps: normalizeBps(t.schemeBps)});
         parsed.processingBps = normalizeBps(parsed.processingBps);
