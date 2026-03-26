@@ -1037,9 +1037,9 @@ function ProcessorsTab({ settings, persistSettings }) {
             {type:"document",source:{type:"base64",media_type:"application/pdf",data:fileData}},
             {type:"text",text:`Extract ALL acquirer/processor cost data from this contract. Return ONLY JSON:
 {
-  "processingBps": number (base processing fee as decimal, e.g. 0.0008 for 8bps),
-  "perTxnFee": number (per-transaction fee USD),
-  "schemeBps": number (card scheme/network pass-through as decimal),
+  "processingBps": number (DECIMAL MULTIPLIER — divide basis points by 10000. 6bps=0.0006, 8bps=0.0008, 25bps=0.0025. Typical range 0.0003–0.005. DO NOT return raw bps integers or percentages),
+  "perTxnFee": number (per-transaction fee in USD, e.g. 0.03),
+  "schemeBps": number (DECIMAL MULTIPLIER same as above. Visa/MC scheme pass-through. 10bps=0.001, 20bps=0.002. Typical range 0.0005–0.002),
   "monthlyFee": number (fixed monthly USD),
   "isTiered": boolean,
   "tiers": [
@@ -1048,10 +1048,10 @@ function ProcessorsTab({ settings, persistSettings }) {
       "label": "Tier 1 — Up to $X/mo",
       "minVolume": number (monthly volume floor USD, 0 for first tier),
       "maxVolume": number or null (monthly volume ceiling USD, null for top tier),
-      "processingBps": number,
-      "perTxnFee": number,
-      "schemeBps": number,
-      "monthlyFee": number
+      "processingBps": number (decimal multiplier, same rule as above — 6bps=0.0006),
+      "perTxnFee": number (USD),
+      "schemeBps": number (decimal multiplier — 10bps=0.001),
+      "monthlyFee": number (USD)
     }
   ],
   "currency": "USD",
@@ -1060,15 +1060,21 @@ function ProcessorsTab({ settings, persistSettings }) {
 }
 For tiers, set label like "Tier 1 — $0–$500K/mo", "Tier 2 — $500K–$2M/mo" etc based on the volume thresholds in the contract.
 If not tiered, still populate tiers array with a single entry using the base rates and label "Standard Rate".
-Never use null for numeric fields — use 0.`}
+Never use null for numeric fields — use 0. All rate fields must be decimal multipliers (divide bps by 10000).`}
           ]}]
         })
       });
       const data = await res.json();
       const parsed = parseJSON(data.content?.map(b=>b.text||"").join("")||"");
       if (parsed) {
-        // Normalize rate fields: if AI returned a percentage (e.g. 5 for 500bps) instead of decimal (0.05), fix it
-        const normalizeBps = v => (v != null && v > 0.5) ? v / 100 : (v || 0);
+        // Normalize rate fields to pure decimal multiplier (e.g. 6bps → 0.0006)
+        // AI commonly returns: integer bps (6), percentage decimal (0.6 for 0.06%), or correct decimal (0.0006)
+        const normalizeBps = v => {
+          if (!v || v === 0) return 0;
+          if (v >= 1)   return v / 10000;  // integer bps: 6 → 0.0006
+          if (v >= 0.5) return v / 1000;   // very high decimal like 0.6 → 0.0006
+          return v;                          // already a reasonable decimal
+        };
         const normalizeTier = t => ({...t, processingBps: normalizeBps(t.processingBps), schemeBps: normalizeBps(t.schemeBps)});
         parsed.processingBps = normalizeBps(parsed.processingBps);
         parsed.schemeBps = normalizeBps(parsed.schemeBps);
