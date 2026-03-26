@@ -830,7 +830,15 @@ function PricingStep({ analysis, activeTier, activeProcessor, adyenCostRate, tar
           )}
           <div style={S.marginStack}>
             <div style={S.msRow}><div style={S.msLabel}>Gross Margin (above interchange)</div><div style={{...S.msVal,color:T.accent}}>{fmtPct2(targetMargin)}</div><div style={S.msMoney}>{fmt$(vol*targetMargin)}/mo</div></div>
-            {activeTier && <div style={S.msRow}><div style={S.msLabel}>− {activeProcessor?.name} Cost ({activeTier.label})</div><div style={{...S.msVal,color:T.gold}}>{fmtPct2(adyenCostRate)}</div><div style={S.msMoney}>−{fmt$(vol*adyenCostRate)}/mo</div></div>}
+            {activeTier && (<>
+              <div style={S.msRow}><div style={S.msLabel}>− {activeProcessor?.name} Cost ({activeTier.label})</div><div style={{...S.msVal,color:T.gold}}>{fmtPct2(adyenCostRate)}</div><div style={S.msMoney}>−{fmt$(vol*adyenCostRate)}/mo</div></div>
+              <div style={{paddingLeft:16,display:"flex",flexDirection:"column",gap:3,marginTop:-4,marginBottom:4}}>
+                {(activeTier.processingBps||0)>0 && <div style={{fontSize:11,color:T.muted}}>Processing: {fmtBps(activeTier.processingBps)} × {fmt$(vol)} = {fmt$(vol*(activeTier.processingBps||0))}</div>}
+                {(activeTier.schemeBps||0)>0 && <div style={{fontSize:11,color:T.muted}}>Scheme: {fmtBps(activeTier.schemeBps)} × {fmt$(vol)} = {fmt$(vol*(activeTier.schemeBps||0))}</div>}
+                {(activeTier.perTxnFee||0)>0 && <div style={{fontSize:11,color:T.muted}}>Per-txn: ${(activeTier.perTxnFee||0).toFixed(4)} × {txns} txns = {fmt$(txns*(activeTier.perTxnFee||0))}</div>}
+                {(activeTier.monthlyFee||0)>0 && <div style={{fontSize:11,color:T.muted}}>Monthly fee: {fmt$(activeTier.monthlyFee||0)}</div>}
+              </div>
+            </>)}
             <div style={{...S.msRow,...S.msTotal}}><div style={S.msLabel}>= Your Net Margin</div><div style={{...S.msVal,color:belowFloor?T.red:T.green,fontSize:20,fontWeight:800}}>{fmtPct2(netMargin)}</div><div style={{...S.msMoney,color:belowFloor?T.red:T.green,fontWeight:700}}>{fmt$(vol*netMargin)}/mo</div></div>
             <div style={S.msArrRow}><span style={S.msArrLabel}>Net ARR</span>                  <span style={{...S.msArrVal,color:belowFloor?T.red:T.blue}}>{fmt$(annVol*netMargin)}</span></div>
           </div>
@@ -1059,10 +1067,15 @@ Never use null for numeric fields — use 0.`}
       const data = await res.json();
       const parsed = parseJSON(data.content?.map(b=>b.text||"").join("")||"");
       if (parsed) {
+        // Normalize rate fields: if AI returned a percentage (e.g. 5 for 500bps) instead of decimal (0.05), fix it
+        const normalizeBps = v => (v != null && v > 0.5) ? v / 100 : (v || 0);
+        const normalizeTier = t => ({...t, processingBps: normalizeBps(t.processingBps), schemeBps: normalizeBps(t.schemeBps)});
+        parsed.processingBps = normalizeBps(parsed.processingBps);
+        parsed.schemeBps = normalizeBps(parsed.schemeBps);
         if (!parsed.tiers || parsed.tiers.length===0) {
           parsed.tiers = [{id:"flat",label:"Standard Rate",minVolume:0,maxVolume:null,processingBps:parsed.processingBps,perTxnFee:parsed.perTxnFee,schemeBps:parsed.schemeBps,monthlyFee:parsed.monthlyFee}];
         }
-        parsed.tiers = parsed.tiers.map((t,i)=>({...t, id: t.id||`tier_${i+1}`}));
+        parsed.tiers = parsed.tiers.map((t,i)=>({...normalizeTier(t), id: t.id||`tier_${i+1}`}));
         updateProcessor(proc.id, { rates: parsed, activeTierId: parsed.tiers[0]?.id });
       } else { alert("Could not parse contract. Check the PDF and try again."); }
     } catch(err) { alert("Error: "+err.message); }
