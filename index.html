@@ -251,7 +251,14 @@ Return ONLY JSON (no markdown, all rate fields as decimals e.g. 0.0272 not 2.72)
         })
       });
       const data = await res.json();
-      const parsed = parseJSON(data.content?.map(b => b.text || "").join("") || "");
+      // Surface API-level errors (invalid key, model, quota, etc.)
+      if (data.type === "error" || data.error) {
+        const msg = data.error?.message || JSON.stringify(data.error || data);
+        alert("API error: " + msg);
+        setLoading(false); return;
+      }
+      const rawText = data.content?.map(b => b.text || "").join("") || "";
+      const parsed = parseJSON(rawText);
       if (parsed) {
         // Force the exact computed values regardless of what AI returned
         parsed.proposedRates   = exactRates;
@@ -260,7 +267,10 @@ Return ONLY JSON (no markdown, all rate fields as decimals e.g. 0.0272 not 2.72)
         parsed.savings         = { monthly: savingsMonthly, annual: savingsMonthly * 12, savingsPct: analysis.totalFees > 0 ? savingsMonthly / analysis.totalFees : 0 };
         setProposal(parsed);
         setStep("proposal");
-      } else alert("Could not generate proposal.");
+      } else {
+        console.error("Proposal raw response:", rawText);
+        alert("Could not parse proposal response. Check console for details.");
+      }
     } catch (err) { alert("Error: " + err.message); }
     setLoading(false);
   };
