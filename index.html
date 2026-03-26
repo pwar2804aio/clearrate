@@ -500,6 +500,10 @@ Return ONLY JSON (no markdown, all rate fields as decimals e.g. 0.0272 not 2.72)
                   </div>
                 </div>
 
+                <div style={{padding:"18px 24px",background:"#0f1628",border:`1px solid ${T.cardBorder}`,borderRadius:12,marginBottom:32,fontSize:14,color:T.muted,lineHeight:1.7,textAlign:"center"}}>
+                  Payments are just one part of the system—AIO connects your POS, ordering, staffing, and back-office tools into a single platform, reducing manual work and giving you a clearer view of your business.
+                </div>
+
                 <div style={S.section}>
                   <h2 style={S.h2}>Proposed Rates</h2>
                   <div style={S.grid4}>
@@ -530,16 +534,19 @@ Return ONLY JSON (no markdown, all rate fields as decimals e.g. 0.0272 not 2.72)
 
 
 
-                {proposal.sellingPoints?.length>0&&(
-                  <div style={S.section}>
-                    <h2 style={S.h2}>Key Value Points</h2>
-                    <div style={S.vpGrid}>
-                      {proposal.sellingPoints.map((p,i)=>(
-                        <div key={i} style={S.vpCard}><span style={{fontSize:20,fontWeight:800,color:T.accent+"60",flexShrink:0}}>{String(i+1).padStart(2,"0")}</span><span style={{fontSize:14,color:T.text,lineHeight:1.5}}>{p}</span></div>
-                      ))}
-                    </div>
+                <div style={S.section}>
+                  <h2 style={S.h2}>Key Value Points</h2>
+                  <div style={S.vpGrid}>
+                    {[
+                      "One platform for payments, POS, and operations—no more disconnected systems",
+                      `Clear, predictable pricing with immediate annual savings of ${fmt$(savingsAnnual)}`,
+                      "Real-time visibility into sales, costs, and performance across your business",
+                      "Less manual work for your team through automation and AI-powered workflows"
+                    ].map((p,i)=>(
+                      <div key={i} style={S.vpCard}><span style={{fontSize:20,fontWeight:800,color:T.accent+"60",flexShrink:0}}>{String(i+1).padStart(2,"0")}</span><span style={{fontSize:14,color:T.text,lineHeight:1.5}}>{p}</span></div>
+                    ))}
                   </div>
-                )}
+                </div>
                 <div style={S.btnRow}>
                   <button style={{...S.btn,...S.btnSecondary}} onClick={()=>setStep("pricing")}>← Adjust Pricing</button>
                   <button style={{...S.btn,...S.btnPrimary}} onClick={()=>printProposal(proposal, analysis, activeTier, activeProcessor, targetMargin, netMargin, fmtPct2, fmt$)}>Print / Export PDF</button>
@@ -656,6 +663,10 @@ function printProposal(proposal, analysis, activeTier, activeProcessor, targetMa
     </div>
   </div>
 
+  <div style="padding:14px 20px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;margin-bottom:28px;font-size:13px;color:#64748b;line-height:1.7;text-align:center;">
+    Payments are just one part of the system—AIO connects your POS, ordering, staffing, and back-office tools into a single platform, reducing manual work and giving you a clearer view of your business.
+  </div>
+
   <div class="section">
     <h2>Proposed ${proposal.pricingModel === 'flat-rate' ? 'Flat Rate' : proposal.pricingModel === '2-tier' ? '2-Tier' : 'Interchange Plus'} Pricing</h2>
     <div class="rates-grid">${ratesHtml}</div>
@@ -673,13 +684,17 @@ function printProposal(proposal, analysis, activeTier, activeProcessor, targetMa
     </table>
   </div>
 
-  ${proposal.sellingPoints?.length ? `
   <div class="section">
     <h2>Key Value Points</h2>
     <div class="vp-grid">
-      ${proposal.sellingPoints.map((p,i)=>`<div class="vp"><span class="vp-num">${String(i+1).padStart(2,'0')}</span><span>${p}</span></div>`).join('')}
+      ${[
+        "One platform for payments, POS, and operations—no more disconnected systems",
+        `Clear, predictable pricing with immediate annual savings of ${fmt$(savingsAnnual)}`,
+        "Real-time visibility into sales, costs, and performance across your business",
+        "Less manual work for your team through automation and AI-powered workflows"
+      ].map((p,i)=>`<div class="vp"><span class="vp-num">${String(i+1).padStart(2,'0')}</span><span>${p}</span></div>`).join('')}
     </div>
-  </div>` : ''}
+  </div>
 
   <div class="footer">
     <span>AIO — AI for Restaurants</span>
