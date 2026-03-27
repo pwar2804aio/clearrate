@@ -1242,6 +1242,9 @@ const AS = {
 
 // ─── Generate Customer Proposal (opens new tab with self-contained HTML) ──────
 function printProposal(proposal, analysis, activeTier, activeProcessor, targetMargin, netMargin, fmtPct2, fmt$) {
+  const safeName = (analysis.merchantName || 'Merchant').replace(/[^a-zA-Z0-9]/g, '-');
+  const dateStr  = new Date().toISOString().slice(0, 10);
+  const fileName = 'AIO-Proposal-' + safeName + '-' + dateStr + '.pdf';
   const vol = analysis.totalVolume || 1;
   const currentEffRate = (analysis.totalFees || 0) / vol;
   const proposedEffRate = (proposal.projectedFees?.monthly || 0) / vol;
@@ -1393,7 +1396,7 @@ function printProposal(proposal, analysis, activeTier, activeProcessor, targetMa
       var btn  = document.getElementById('pdf-btn');
       wrap.style.visibility = 'hidden';
       btn.disabled = true;
-      var fileName = 'AIO-Proposal-${(analysis.merchantName||'Merchant').replace(/[^a-zA-Z0-9]/g,'-')}-${new Date().toISOString().slice(0,10)}.pdf';
+      var fileName = '${fileName}';
       html2pdf().set({
         margin:      [10,10,10,10],
         filename:    fileName,
