@@ -205,29 +205,32 @@ FIELDS:
 
 CRITICAL RULES — READ CAREFULLY:
 
-RULE 1 — IC+ STATEMENTS WHERE INTERCHANGE IS NOT SHOWN (e.g. Toast, some Heartland/TSYS):
-Many IC+ processors show ONLY the markup fees on the statement and pass interchange through separately.
-If this is interchange-plus pricing AND interchange is NOT itemized on this statement:
-  • Set interchangeNotShown = true
-  • Set interchangeFees = 0 and interchangeRate = 0
-  • processorFees = ONLY the markup dollar amount = totalVolume × statedMarkupRate + totalTransactions × statedPerTxnFee
-    (Calculate this from the rates shown — do NOT use any "total fees" line that might include interchange)
-  • totalFees = processorFees + otherFees (DO NOT include interchange since it is not on this statement)
-  • effectiveRate = totalFees / totalVolume (this will only reflect the markup portion, NOT total cost)
-  • statedMarkupRate = the % markup rate shown (e.g. 0.0025 for 0.25%)
-  • statedPerTxnFee = the per-txn fee shown (e.g. 0.10)
+RULE 1 — IC+ STATEMENTS WHERE INTERCHANGE IS NOT BROKEN OUT (e.g. Toast, some Heartland/TSYS):
+These statements show the TOTAL fees (interchange + markup combined) but do not itemize interchange separately.
+They DO show the markup rate (e.g. 0.25% + $0.10/txn) which is what the processor charges ABOVE interchange.
 
-RULE 2 — IC+ STATEMENTS WHERE INTERCHANGE IS SHOWN:
+If this is interchange-plus pricing AND interchange is NOT itemized as a separate line:
+  • Set interchangeNotShown = true
+  • totalFees = the TOTAL fees shown on the statement (this INCLUDES interchange — use the grand total)
+  • statedMarkupRate = the explicit % markup rate printed (e.g. 0.0025 for 0.25%)
+  • statedPerTxnFee = the explicit per-transaction markup fee printed (e.g. 0.10)
+  • processorFees = markup-only dollar amount = totalVolume × statedMarkupRate + totalTransactions × statedPerTxnFee
+  • interchangeFees = totalFees − processorFees − otherFees  (back-calculated — the remainder IS interchange)
+  • interchangeRate = interchangeFees / totalVolume
+  • effectiveRate = totalFees / totalVolume  (true full effective rate including interchange)
+  • processorMarkup = statedMarkupRate
+
+RULE 2 — IC+ STATEMENTS WHERE INTERCHANGE IS ITEMIZED:
   • Set interchangeNotShown = false
-  • interchangeFees = the interchange dollar amount shown
-  • processorFees = fees shown ABOVE interchange (markup fees only)
+  • interchangeFees = the interchange dollar amount explicitly shown
+  • processorFees = fees shown above interchange (the markup)
   • totalFees = interchangeFees + processorFees + otherFees
 
 RULE 3 — FLAT-RATE OR TIERED STATEMENTS:
   • Set interchangeNotShown = false
   • totalFees = all fees on the statement
-  • processorFees = totalFees - otherFees (interchange is bundled in, cannot separate)
-  • interchangeFees = 0
+  • interchangeFees = 0  (interchange is bundled, cannot be separated)
+  • processorFees = totalFees − otherFees
 
 RULE 4 — processorMarkup is always a RATE (decimal), never a dollar amount.
   e.g. 0.25% = 0.0025, 1.5% = 0.015
@@ -248,20 +251,23 @@ Use 0 for unknown numerics. Never null.` }
         const vol  = parsed.totalVolume  || 0;
         const txns = parsed.totalTransactions || 0;
 
-        // ── IC+ WITHOUT INTERCHANGE SHOWN (e.g. Toast) ─────────────────────
-        // Re-derive processorFees from the stated markup rates to prevent
-        // the AI from accidentally including interchange in the markup number.
+        // ── IC+ WHERE INTERCHANGE IS NOT ITEMIZED (e.g. Toast) ─────────────
+        // totalFees = full statement total (interchange + markup).
+        // Hard-recalculate processorFees from stated rates, then back-calculate
+        // interchange as the remainder: interchange = totalFees - markup - other.
         if (parsed.interchangeNotShown && vol > 0) {
-          const markupRate   = parsed.statedMarkupRate  || parsed.processorMarkup || 0;
-          const perTxnFee    = parsed.statedPerTxnFee   || 0;
-          // Hard-recalculate markup fees from the printed rates
-          const calcMarkup   = vol * markupRate + txns * perTxnFee;
+          const markupRate = parsed.statedMarkupRate || parsed.processorMarkup || 0;
+          const perTxnFee  = parsed.statedPerTxnFee  || 0;
+          // Recalculate markup from the printed rates — authoritative
+          const calcMarkup = vol * markupRate + txns * perTxnFee;
           if (calcMarkup > 0) parsed.processorFees = calcMarkup;
-          parsed.interchangeFees = 0;
-          parsed.interchangeRate = 0;
           parsed.processorMarkup = markupRate;
-          // totalFees = only what appears on the statement (markup + other)
-          parsed.totalFees = parsed.processorFees + (parsed.otherFees || 0);
+          // Back-calculate interchange as the remainder of total fees
+          const backCalcIC = (parsed.totalFees || 0) - parsed.processorFees - (parsed.otherFees || 0);
+          parsed.interchangeFees = Math.max(0, backCalcIC);
+          parsed.interchangeRate = parsed.interchangeFees / vol;
+          // Effective rate = full total / volume (includes interchange)
+          if (parsed.totalFees > 0) parsed.effectiveRate = parsed.totalFees / vol;
         }
 
         // Volume-derived pcts
@@ -487,18 +493,18 @@ Return ONLY JSON (no markdown, all rate fields as decimals e.g. 0.0272 not 2.72)
                   </div>
                   <div style={S.badge}>{analysis.currentPricingModel?.replace("-"," ").toUpperCase()}</div>
                 </div>
-                {/* ── Interchange-not-shown banner ── */}
+                {/* ── IC+ back-calculated interchange banner ── */}
                 {analysis.interchangeNotShown && (
                   <div style={{margin:"12px 0",padding:"12px 16px",background:"#1e1b4b",border:"1px solid #6366f180",borderRadius:10,display:"flex",gap:12,alignItems:"flex-start"}}>
                     <span style={{fontSize:18,flexShrink:0}}>ℹ️</span>
                     <div>
                       <div style={{fontSize:13,fontWeight:700,color:"#a5b4fc",marginBottom:3}}>
-                        IC+ Statement — Interchange Not Shown ({analysis.currentProcessorName})
+                        IC+ Statement — Interchange Back-Calculated ({analysis.currentProcessorName})
                       </div>
                       <div style={{fontSize:12,color:"#94a3b8",lineHeight:1.6}}>
-                        This statement only shows the processor markup ({analysis.statedMarkupRate > 0 ? fmtPct2(analysis.statedMarkupRate) : "stated rate"} + ${(analysis.statedPerTxnFee||0).toFixed(2)}/txn).
-                        Interchange is passed through separately and is <strong style={{color:"#c7d2fe"}}>not included in the fee totals below</strong>.
-                        The true all-in cost to this merchant is interchange (typically 1.5%–2.2%) <em>plus</em> the markup shown.
+                        This statement shows total fees but does not itemize interchange separately.
+                        Markup fees were calculated from the stated rates ({fmtPct2(analysis.statedMarkupRate||0)} + ${(analysis.statedPerTxnFee||0).toFixed(2)}/txn).
+                        <strong style={{color:"#c7d2fe"}}> Interchange = total fees − markup − other fees</strong> (back-calculated from the statement total).
                       </div>
                     </div>
                   </div>
@@ -506,10 +512,10 @@ Return ONLY JSON (no markdown, all rate fields as decimals e.g. 0.0272 not 2.72)
 
                 <div style={S.grid4}>
                   {[
-                    {label:"Monthly Volume",        val:fmt$(analysis.totalVolume)},
-                    {label: analysis.interchangeNotShown ? "Markup Fees (Shown)" : "Total Fees", val:fmt$(analysis.totalFees), accent:true},
-                    {label: analysis.interchangeNotShown ? "Markup Rate Only"    : "Effective Rate", val:fmtPct2(analysis.effectiveRate), accent:true},
-                    {label:"Avg Ticket",             val:fmt$(analysis.averageTicket)},
+                    {label:"Monthly Volume",  val:fmt$(analysis.totalVolume)},
+                    {label:"Total Fees",       val:fmt$(analysis.totalFees),  accent:true},
+                    {label:"Effective Rate",   val:fmtPct2(analysis.effectiveRate), accent:true},
+                    {label:"Avg Ticket",       val:fmt$(analysis.averageTicket)},
                   ].map(m=>(
                     <div key={m.label} style={{...S.metricCard,...(m.accent?S.metricAccent:{})}}><div style={S.metricVal}>{m.val}</div><div style={S.metricLbl}>{m.label}</div></div>
                   ))}
@@ -525,21 +531,16 @@ Return ONLY JSON (no markdown, all rate fields as decimals e.g. 0.0272 not 2.72)
                     const totalMarkup = myMarkup+(analysis.otherFees||0);
                     const totalMarkupRate = totalMarkup/(analysis.totalVolume||1);
                     const rows=[
-                      {name:"Interchange",note:analysis.interchangeNotShown?"Not itemized on this statement — passed through separately":"Card network cost — non-negotiable",amt:analysis.interchangeFees,rate:analysis.interchangeRate,color:"#3b82f6",dim:analysis.interchangeNotShown},
+                      {name:"Interchange",note:analysis.interchangeNotShown?"Back-calculated: total fees − markup − other fees":"Card network cost — non-negotiable",amt:analysis.interchangeFees,rate:analysis.interchangeRate,color:"#3b82f6"},
                       {name:`${activeProcessor.name} Cost`,note:"Your acquirer cost — processing + txn + scheme",amt:adyenCost,rate:adyenRate,color:T.gold},
                       {name:"Your Markup",note:"Processor markup above interchange & acquirer",amt:myMarkup,rate:myRate,color:T.green},
                       {name:"Other Fees",note:"Monthly, PCI, misc. — pure margin, no cost to you",amt:analysis.otherFees,rate:(analysis.otherFees||0)/(analysis.totalVolume||1),color:T.green},
                     ];
                     return(<div style={S.feeTable}>
-                      {rows.map(r=>(<div key={r.name} style={{...S.feeRow,opacity:r.dim?0.45:1}}>
-                        <div style={S.feeName}>
-                          <span style={{color:r.color,fontWeight:600}}>{r.name}</span>
-                          {r.dim && <span style={{fontSize:10,color:"#6366f1",background:"#1e1b4b",borderRadius:4,padding:"1px 6px",marginLeft:6,fontWeight:600}}>NOT SHOWN</span>}
-                          <span style={S.feeNote}>{r.note}</span>
-                        </div>
-                        <div style={S.feeAmt}>{r.dim ? "—" : fmt$(r.amt)}</div>
-                        <div style={S.feeRate}>{r.dim ? "—" : fmtPct(r.rate)}</div>
-                        <div style={S.feeBar}><div style={{...S.feeBarFill,width:r.dim?0:`${Math.min(((r.amt||0)/(analysis.totalFees||1))*100,100)}%`,background:r.color}}/></div>
+                      {rows.map(r=>(<div key={r.name} style={S.feeRow}>
+                        <div style={S.feeName}><span style={{color:r.color,fontWeight:600}}>{r.name}</span><span style={S.feeNote}>{r.note}</span></div>
+                        <div style={S.feeAmt}>{fmt$(r.amt)}</div><div style={S.feeRate}>{fmtPct(r.rate)}</div>
+                        <div style={S.feeBar}><div style={{...S.feeBarFill,width:`${Math.min(((r.amt||0)/(analysis.totalFees||1))*100,100)}%`,background:r.color}}/></div>
                       </div>))}
                       <div style={{...S.feeRow,background:`${T.green}08`,borderTop:`2px solid ${T.green}30`}}>
                         <div style={S.feeName}><span style={{color:T.green,fontWeight:700}}>Total Margin Opportunity</span><span style={S.feeNote}>Everything above interchange & acquirer cost</span></div>
