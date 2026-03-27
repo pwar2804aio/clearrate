@@ -589,6 +589,7 @@ function ApplyStep({ analysis, proposal, onBack, onNewProposal }) {
   const savingsAnnual = ((analysis.totalFees||0) - (proposal.projectedFees?.monthly||0)) * 12;
 
   const [submitted, setSubmitted] = useState(false);
+  const [adyenProgress, setAdyenProgress] = useState(null); // null | array of step objects
   const [section, setSection] = useState(0); // 0–4
 
   const [biz, setBiz] = useState({
@@ -652,15 +653,15 @@ function ApplyStep({ analysis, proposal, onBack, onNewProposal }) {
     </div>
   );
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
+    // Always persist locally first
     const app = {
       id: Date.now(),
       submittedAt: new Date().toISOString(),
       merchantName: biz.dba || biz.legalName,
-      analysis,
-      proposal,
-      savingsAnnual,
-      business: biz, owner, processing, banking: { ...banking, accountNumber: "****"+banking.accountNumber.slice(-4), accountConfirm: undefined },
+      analysis, proposal, savingsAnnual,
+      business: biz, owner, processing,
+      banking: { ...banking, accountNumber: "****"+banking.accountNumber.slice(-4), accountConfirm: undefined },
       agreement: { sigName: agreement.sigName, sigDate: agreement.sigDate },
     };
     try {
@@ -668,8 +669,178 @@ function ApplyStep({ analysis, proposal, onBack, onNewProposal }) {
       existing.unshift(app);
       localStorage.setItem("aio_applications", JSON.stringify(existing.slice(0,500)));
     } catch {}
-    setSubmitted(true);
+
+    const adyenCfg = getAdyenConfig();
+    if (!adyenCfg.lemApiKey || !adyenCfg.managementApiKey) {
+      // No Adyen keys configured — skip API calls
+      setSubmitted(true);
+      return;
+    }
+
+    // ── Adyen onboarding flow ──────────────────────────────────────────────
+    const ADYEN_STEPS = [
+      { key:"org",      label:"Create Organization Legal Entity" },
+      { key:"indiv",    label:"Create Owner Legal Entity" },
+      { key:"assoc",    label:"Link Owner as UBO & Signatory" },
+      { key:"bizline",  label:"Create Business Line" },
+      { key:"bank",     label:"Add Bank Account" },
+      { key:"merchant", label:"Create Merchant Account" },
+    ];
+    const initSteps = ADYEN_STEPS.map((s,i) => ({ ...s, status: i===0?"running":"pending", adyenId:null, error:null }));
+    setAdyenProgress(initSteps);
+
+    const tick = (key, status, adyenId=null, error=null) =>
+      setAdyenProgress(prev => {
+        const idx = prev.findIndex(s=>s.key===key);
+        return prev.map((s,i) => {
+          if (s.key === key) return { ...s, status, adyenId, error };
+          if (i === idx+1 && status === "done") return { ...s, status:"running" };
+          return s;
+        });
+      });
+
+    const lemKey  = adyenCfg.lemApiKey;
+    const mgmtKey = adyenCfg.managementApiKey;
+    let orgId, indivId, businessLineId, transferId, merchantId;
+
+    try {
+      // 1 — Organization
+      const orgPayload = {
+        type: "organization",
+        organization: {
+          legalName: biz.legalName || biz.dba,
+          registeredAddress: { street: biz.address||"N/A", city: biz.city||"N/A", stateOrProvince: biz.state||"N/A", postalCode: biz.zip||"00000", country:"US" },
+          ...(biz.taxId ? { taxInformation:[{ country:"US", number:biz.taxId, type:"EIN" }] } : {}),
+        }
+      };
+      const orgRes = await adyenPost("/legalEntities", lemKey, orgPayload, true);
+      orgId = orgRes.id;
+      tick("org", "done", orgId);
+
+      // 2 — Individual (owner)
+      const rawPhone = (owner.phone||"").replace(/\D/g,"");
+      const indivPayload = {
+        type: "individual",
+        individual: {
+          name: { firstName: owner.firstName||"Unknown", lastName: owner.lastName||"Unknown" },
+          ...(owner.dob ? { dateOfBirth: owner.dob } : {}),
+          ...(owner.address ? {
+            residentialAddress: { street: owner.address, city: owner.city||"N/A", stateOrProvince: owner.state||"N/A", postalCode: owner.zip||"00000", country:"US" }
+          } : {}),
+          ...(rawPhone.length >= 10 ? { phone:{ number:"+1"+rawPhone.slice(-10), type:"mobile" } } : {}),
+          ...(owner.ssn ? { taxInformation:[{ country:"US", number:owner.ssn, type:"SSN" }] } : {}),
+        }
+      };
+      const indivRes = await adyenPost("/legalEntities", lemKey, indivPayload, true);
+      indivId = indivRes.id;
+      tick("indiv", "done", indivId);
+
+      // 3 — Associate owner with org
+      await adyenPatch(`/legalEntities/${orgId}`, lemKey, {
+        entityAssociations:[
+          { legalEntityId: indivId, type:"uboThroughOwnership" },
+          { legalEntityId: indivId, type:"signatory" },
+        ]
+      });
+      tick("assoc", "done", null);
+
+      // 4 — Business line
+      const bizLinePayload = {
+        legalEntityId: orgId,
+        industryCode: processing.mcc || "5812",
+        service: "receivePayments",
+        ...(biz.website
+          ? { webData:[{ webAddress: biz.website.startsWith("http") ? biz.website : "https://"+biz.website }] }
+          : { webDataExemption:{ reason:"noOnlinePresence" } }),
+      };
+      const blRes = await adyenPost("/businessLines", lemKey, bizLinePayload, true);
+      businessLineId = blRes.id;
+      tick("bizline", "done", businessLineId);
+
+      // 5 — Bank account
+      const bankPayload = {
+        legalEntityId: orgId,
+        type: "bankAccount",
+        bankAccount: {
+          countryCode: "US",
+          accountIdentification: {
+            type: "usLocal",
+            bankAccountNumber: banking.accountNumber,
+            routingNumber: banking.routingNumber,
+            accountType: banking.accountType || "checking",
+          }
+        }
+      };
+      const bankRes = await adyenPost("/transferInstruments", lemKey, bankPayload, true);
+      transferId = bankRes.id;
+      tick("bank", "done", transferId);
+
+      // 6 — Merchant account
+      const merchantPayload = {
+        companyId: adyenCfg.companyId || "AIOAppInc",
+        legalEntityId: orgId,
+        businessLineId,
+        description: `${biz.dba||biz.legalName} — AIO Payment Processing`,
+        reference: `aio-${Date.now()}`,
+      };
+      const merchantRes = await adyenPost("/merchants", mgmtKey, merchantPayload, false);
+      merchantId = merchantRes.id;
+      tick("merchant", "done", merchantId);
+
+      // Persist Adyen IDs back to the saved application
+      try {
+        const existing = JSON.parse(localStorage.getItem("aio_applications")||"[]");
+        if (existing.length) {
+          existing[0].adyen = { orgId, indivId, businessLineId, transferId, merchantId, environment: adyenCfg.environment||"test" };
+          localStorage.setItem("aio_applications", JSON.stringify(existing));
+        }
+      } catch {}
+
+      setTimeout(() => setSubmitted(true), 1200);
+    } catch (err) {
+      setAdyenProgress(prev => prev.map(s => s.status==="running" ? {...s, status:"error", error:err.message} : s));
+    }
   };
+
+  // ── Adyen Progress Overlay ─────────────────────────────────────────────────
+  if (adyenProgress && !submitted) {
+    const hasError = adyenProgress.some(s=>s.status==="error");
+    const allDone  = adyenProgress.every(s=>s.status==="done");
+    const statusIcon = s => s.status==="done"?"✓":s.status==="running"?"⟳":s.status==="error"?"✕":"·";
+    const statusColor = s => s.status==="done"?T.green:s.status==="running"?"#0ea5e9":s.status==="error"?T.red:T.muted;
+    return (
+      <div style={{...S.panel, paddingTop:48, paddingBottom:48}}>
+        <div style={{textAlign:"center",marginBottom:36}}>
+          <div style={{fontSize:13,color:T.muted,textTransform:"uppercase",letterSpacing:2,marginBottom:8}}>Adyen Onboarding</div>
+          <h2 style={{fontSize:26,fontWeight:800,color:T.white,marginBottom:8}}>
+            {hasError ? "Submission Error" : allDone ? "Onboarding Complete!" : "Submitting Application…"}
+          </h2>
+          <p style={{fontSize:14,color:T.muted,maxWidth:480,margin:"0 auto"}}>
+            {hasError ? "One step failed. Review the error below, then retry or continue." : "Creating your Legal Entity, Business Line, and Merchant Account in Adyen."}
+          </p>
+        </div>
+        <div style={{maxWidth:580,margin:"0 auto",display:"flex",flexDirection:"column",gap:10}}>
+          {adyenProgress.map((s,i) => (
+            <div key={s.key} style={{background:T.card,border:`1px solid ${s.status==="error"?"#ef444440":s.status==="done"?"#22c55e30":s.status==="running"?"#0ea5e930":T.cardBorder}`,borderRadius:12,padding:"14px 20px",display:"flex",alignItems:"center",gap:14,transition:"all .3s"}}>
+              <div style={{width:32,height:32,borderRadius:"50%",background:s.status==="running"?"rgba(14,165,233,0.1)":s.status==="done"?"rgba(34,197,94,0.1)":s.status==="error"?"rgba(239,68,68,0.1)":"rgba(255,255,255,0.04)",border:`1.5px solid ${statusColor(s)}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,color:statusColor(s),fontWeight:700,animation:s.status==="running"?"spin 1.2s linear infinite":"none",flexShrink:0}}>{statusIcon(s)}</div>
+              <div style={{flex:1}}>
+                <div style={{fontSize:14,fontWeight:600,color:s.status==="pending"?T.muted:T.text}}>{i+1}. {s.label}</div>
+                {s.adyenId && <div style={{fontSize:11,color:T.green,fontFamily:"monospace",marginTop:3}}>ID: {s.adyenId}</div>}
+                {s.error   && <div style={{fontSize:11,color:T.red,marginTop:3,lineHeight:1.4}}>{s.error}</div>}
+              </div>
+              <div style={{fontSize:11,color:statusColor(s),fontWeight:700,textTransform:"uppercase",letterSpacing:.5}}>{s.status}</div>
+            </div>
+          ))}
+        </div>
+        {hasError && (
+          <div style={{maxWidth:580,margin:"24px auto 0",display:"flex",gap:12,justifyContent:"center"}}>
+            <button style={{...S.btn,...S.btnSecondary}} onClick={()=>setAdyenProgress(null)}>← Fix & Retry</button>
+            <button style={{...S.btn,...S.btnGhost}} onClick={()=>setSubmitted(true)}>Continue Without Adyen →</button>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   if (submitted) return (
     <div style={{...S.panel, textAlign:"center", paddingTop:60, paddingBottom:60}}>
@@ -678,7 +849,7 @@ function ApplyStep({ analysis, proposal, onBack, onNewProposal }) {
       <div style={{fontSize:16,color:T.muted,maxWidth:480,margin:"0 auto 36px",lineHeight:1.7}}>
         {biz.dba||biz.legalName}'s payment processing application has been received. Our team will review and reach out within 1–2 business days to complete onboarding.
       </div>
-      <div style={{display:"flex",flexDirection:"column",gap:12,maxWidth:440,margin:"0 auto 40px"}}>
+      <div style={{display:"flex",flexDirection:"column",gap:12,maxWidth:480,margin:"0 auto 40px"}}>
         {[
           {icon:"⚡",text:`Quoted rate: ${fmtPct2(proposal.projectedFees?.monthly/vol||0)} effective rate`},
           {icon:"💰",text:`Estimated savings: ${fmt$(savingsAnnual)}/year`},
@@ -689,6 +860,20 @@ function ApplyStep({ analysis, proposal, onBack, onNewProposal }) {
             <span style={{fontSize:14,color:"#e2e8f0"}}>{r.text}</span>
           </div>
         ))}
+        {/* Show Adyen IDs if onboarding ran */}
+        {adyenProgress && adyenProgress.some(s=>s.adyenId) && (
+          <div style={{background:"#052e16",border:"1px solid #22c55e30",borderRadius:12,padding:"16px 20px",textAlign:"left"}}>
+            <div style={{fontSize:11,color:"#4ade80",fontWeight:700,letterSpacing:.5,textTransform:"uppercase",marginBottom:12}}>Adyen Onboarding IDs</div>
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {adyenProgress.filter(s=>s.adyenId).map(s=>(
+                <div key={s.key} style={{display:"flex",justifyContent:"space-between",fontSize:12}}>
+                  <span style={{color:"#94a3b8"}}>{s.label}</span>
+                  <span style={{fontFamily:"monospace",color:"#22c55e"}}>{s.adyenId}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
       <div style={{display:"flex",gap:12,justifyContent:"center",flexWrap:"wrap"}}>
         <button style={{...S.btn,...S.btnSecondary}} onClick={()=>setSubmitted(false)}>← View Application</button>
@@ -1361,6 +1546,127 @@ function PricingStep({ analysis, activeTier, activeProcessor, adyenCostRate, tar
   );
 }
 
+// ─── Adyen API Helpers ────────────────────────────────────────────────────────
+function getAdyenConfig() {
+  try { return JSON.parse(localStorage.getItem("clearrate:adyen_config") || "{}"); } catch { return {}; }
+}
+function saveAdyenConfig(cfg) {
+  localStorage.setItem("clearrate:adyen_config", JSON.stringify(cfg));
+}
+
+async function adyenReq(method, urlPath, apiKey, body, isLem = true) {
+  const config = getAdyenConfig();
+  const env    = config.environment || "test";
+  const proxy  = config.corsProxy   || "https://corsproxy.io/?";
+  const base   = isLem
+    ? (env === "live" ? "https://kyc-live.adyen.com/lem/v3"        : "https://kyc-test.adyen.com/lem/v3")
+    : (env === "live" ? "https://management-live.adyen.com/v3"      : "https://management-test.adyen.com/v3");
+  const target  = base + urlPath;
+  const fullUrl = proxy ? proxy + encodeURIComponent(target) : target;
+  const res = await fetch(fullUrl, {
+    method,
+    headers: { "Content-Type": "application/json", "X-API-Key": apiKey },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    const msg = data?.detail || data?.message || data?.title || data?.errorCode
+              || (data?.invalidFields?.[0]?.message) || JSON.stringify(data).slice(0, 300);
+    throw new Error(msg);
+  }
+  return data;
+}
+const adyenPost  = (path, key, body, isLem=true)  => adyenReq("POST",  path, key, body, isLem);
+const adyenPatch = (path, key, body)               => adyenReq("PATCH", path, key, body, true);
+
+// ─── Adyen Config Section ─────────────────────────────────────────────────────
+function AdyenConfigSection() {
+  const [cfg, setCfg] = React.useState(() => getAdyenConfig());
+  const [testing, setTesting] = React.useState(false);
+  const [testResult, setTestResult] = React.useState(null);
+
+  const upd = (k, v) => {
+    const next = { ...cfg, [k]: v };
+    setCfg(next);
+    saveAdyenConfig(next);
+  };
+
+  const testConnection = async () => {
+    if (!cfg.lemApiKey) { setTestResult({ ok: false, msg: "Enter a LEM API key first." }); return; }
+    setTesting(true); setTestResult(null);
+    try {
+      const env   = cfg.environment || "test";
+      const proxy = cfg.corsProxy   || "https://corsproxy.io/?";
+      const base  = env === "live" ? "https://kyc-live.adyen.com/lem/v3" : "https://kyc-test.adyen.com/lem/v3";
+      const url   = proxy + encodeURIComponent(base + "/legalEntities?pageSize=1");
+      const res   = await fetch(url, { headers: { "X-API-Key": cfg.lemApiKey } });
+      const data  = await res.json();
+      if (res.ok) setTestResult({ ok: true,  msg: "Connected ✓ — LEM API is working." });
+      else        setTestResult({ ok: false, msg: data?.detail || data?.message || `HTTP ${res.status}` });
+    } catch (e) {
+      setTestResult({ ok: false, msg: e.message });
+    }
+    setTesting(false);
+  };
+
+  const rowStyle = { display:"flex", flexDirection:"column", gap:6 };
+  const lbl  = { fontSize:12, color:T.muted, fontWeight:700, letterSpacing:.5, textTransform:"uppercase" };
+  const inp  = { width:"100%", padding:"10px 13px", borderRadius:8, border:`1px solid ${T.cardBorder}`, background:T.bg, color:T.text, fontSize:13, fontFamily:"monospace", outline:"none" };
+
+  return (
+    <div style={{marginTop:40}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
+        <div style={{width:28,height:28,borderRadius:6,background:"#0a1628",border:"1px solid #1e3a5f",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14}}>⚡</div>
+        <h2 style={{...S.h2,margin:0}}>Adyen Integration</h2>
+      </div>
+      <p style={{fontSize:13,color:T.muted,marginBottom:20,lineHeight:1.6}}>
+        Configure your Adyen credentials to automatically create Legal Entities and Merchant Accounts when a processing application is submitted.
+      </p>
+
+      {/* Security warning */}
+      <div style={{padding:"12px 16px",background:"#1c1400",border:"1px solid #f59e0b40",borderRadius:10,fontSize:12,color:"#fbbf24",lineHeight:1.7,marginBottom:24}}>
+        ⚠️ <strong>Security note:</strong> API keys stored here are in browser localStorage. For production use, route Adyen calls through a secure backend. Do not use live keys in shared or public environments.
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginBottom:16}}>
+        <div style={rowStyle}>
+          <label style={lbl}>Environment</label>
+          <select value={cfg.environment||"test"} onChange={e=>upd("environment",e.target.value)} style={inp}>
+            <option value="test">Test</option>
+            <option value="live">Live</option>
+          </select>
+        </div>
+        <div style={rowStyle}>
+          <label style={lbl}>Company ID</label>
+          <input value={cfg.companyId||""} onChange={e=>upd("companyId",e.target.value)} placeholder="e.g. AIOAppInc" style={inp}/>
+        </div>
+        <div style={rowStyle}>
+          <label style={lbl}>LEM API Key (Legal Entity Mgmt)</label>
+          <input type="password" value={cfg.lemApiKey||""} onChange={e=>upd("lemApiKey",e.target.value)} placeholder="CRED42..." style={inp}/>
+        </div>
+        <div style={rowStyle}>
+          <label style={lbl}>Management API Key</label>
+          <input type="password" value={cfg.managementApiKey||""} onChange={e=>upd("managementApiKey",e.target.value)} placeholder="CRED42..." style={inp}/>
+        </div>
+        <div style={{...rowStyle,gridColumn:"span 2"}}>
+          <label style={lbl}>CORS Proxy URL (required for browser calls)</label>
+          <input value={cfg.corsProxy||"https://corsproxy.io/?"} onChange={e=>upd("corsProxy",e.target.value)} placeholder="https://corsproxy.io/?" style={inp}/>
+        </div>
+      </div>
+
+      <div style={{display:"flex",alignItems:"center",gap:12}}>
+        <button onClick={testConnection} disabled={testing}
+          style={{...S.btn,...S.btnSecondary,opacity:testing?.5:1}}>
+          {testing?"Testing...":"Test Connection"}
+        </button>
+        {testResult && (
+          <span style={{fontSize:13,color:testResult.ok?T.green:T.red}}>{testResult.msg}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Settings Page ────────────────────────────────────────────────────────────
 function SettingsPage({ settings, persistSettings }) {
   return (
@@ -1368,6 +1674,7 @@ function SettingsPage({ settings, persistSettings }) {
       <h1 style={S.h1}>Settings</h1>
       <p style={S.sub}>Manage acquirer contracts and pricing tiers.</p>
       <ProcessorsTab settings={settings} persistSettings={persistSettings}/>
+      <AdyenConfigSection/>
     </div>
   );
 }
