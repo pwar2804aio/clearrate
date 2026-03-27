@@ -1745,13 +1745,21 @@ function saveAdyenConfig(cfg) {
   localStorage.setItem("clearrate:adyen_config", JSON.stringify(cfg));
 }
 
-async function adyenReq(method, urlPath, apiKey, body, isLem = true) {
+// apiType: "lem" | "management" | "balancePlatform"
+async function adyenReq(method, urlPath, apiKey, body, apiType = "lem") {
   const config = getAdyenConfig();
   const env    = config.environment || "test";
   const proxy  = config.corsProxy   || "https://corsproxy.io/?";
-  const base   = isLem
-    ? (env === "live" ? "https://kyc-live.adyen.com/lem/v3"        : "https://kyc-test.adyen.com/lem/v3")
-    : (env === "live" ? "https://management-live.adyen.com/v3"      : "https://management-test.adyen.com/v3");
+  let base;
+  if (apiType === "balancePlatform") {
+    base = env === "live"
+      ? "https://balanceplatform-api-live.adyen.com/bcl/v2"
+      : "https://balanceplatform-api-test.adyen.com/bcl/v2";
+  } else if (apiType === "management") {
+    base = env === "live" ? "https://management-live.adyen.com/v3" : "https://management-test.adyen.com/v3";
+  } else {
+    base = env === "live" ? "https://kyc-live.adyen.com/lem/v3" : "https://kyc-test.adyen.com/lem/v3";
+  }
   const target  = base + urlPath;
   const fullUrl = proxy ? proxy + encodeURIComponent(target) : target;
   const res = await fetch(fullUrl, {
@@ -1767,8 +1775,9 @@ async function adyenReq(method, urlPath, apiKey, body, isLem = true) {
   }
   return data;
 }
-const adyenPost  = (path, key, body, isLem=true)  => adyenReq("POST",  path, key, body, isLem);
-const adyenPatch = (path, key, body)               => adyenReq("PATCH", path, key, body, true);
+// Legacy boolean isLem support (true=lem, false=management)
+const adyenPost  = (path, key, body, isLem=true)  => adyenReq("POST",  path, key, body, isLem === false ? "management" : "lem");
+const adyenPatch = (path, key, body)               => adyenReq("PATCH", path, key, body, "lem");
 
 // ─── Adyen Config Section ─────────────────────────────────────────────────────
 function AdyenConfigSection() {
@@ -1783,20 +1792,41 @@ function AdyenConfigSection() {
   };
 
   const testConnection = async () => {
-    if (!cfg.lemApiKey) { setTestResult({ ok: false, msg: "Enter a LEM API key first." }); return; }
+    const hasAny = cfg.balancePlatformApiKey || cfg.lemApiKey || cfg.managementApiKey;
+    if (!hasAny) { setTestResult({ ok: false, msg: "Enter at least one API key first." }); return; }
     setTesting(true); setTestResult(null);
-    try {
-      const env   = cfg.environment || "test";
-      const proxy = cfg.corsProxy   || "https://corsproxy.io/?";
-      const base  = env === "live" ? "https://kyc-live.adyen.com/lem/v3" : "https://kyc-test.adyen.com/lem/v3";
-      const url   = proxy + encodeURIComponent(base + "/legalEntities?pageSize=1");
-      const res   = await fetch(url, { headers: { "X-API-Key": cfg.lemApiKey } });
-      const data  = await res.json();
-      if (res.ok) setTestResult({ ok: true,  msg: "Connected ✓ — LEM API is working." });
-      else        setTestResult({ ok: false, msg: data?.detail || data?.message || `HTTP ${res.status}` });
-    } catch (e) {
-      setTestResult({ ok: false, msg: e.message });
+    const env   = cfg.environment || "test";
+    const proxy = cfg.corsProxy   || "https://corsproxy.io/?";
+    const results = [];
+    // Test Balance Platform key
+    if (cfg.balancePlatformApiKey) {
+      try {
+        const base = env === "live" ? "https://balanceplatform-api-live.adyen.com/bcl/v2" : "https://balanceplatform-api-test.adyen.com/bcl/v2";
+        const res  = await fetch(proxy + encodeURIComponent(base + "/balancePlatform"), { headers: { "X-API-Key": cfg.balancePlatformApiKey } });
+        const data = await res.json();
+        results.push(res.ok ? "Balance Platform ✓" : "Balance Platform ✗ " + (data?.detail || data?.message || "HTTP " + res.status));
+      } catch(e) { results.push("Balance Platform ✗ " + e.message); }
     }
+    // Test LEM key
+    if (cfg.lemApiKey) {
+      try {
+        const base = env === "live" ? "https://kyc-live.adyen.com/lem/v3" : "https://kyc-test.adyen.com/lem/v3";
+        const res  = await fetch(proxy + encodeURIComponent(base + "/legalEntities?pageSize=1"), { headers: { "X-API-Key": cfg.lemApiKey } });
+        const data = await res.json();
+        results.push(res.ok ? "LEM ✓" : "LEM ✗ " + (data?.detail || data?.message || "HTTP " + res.status));
+      } catch(e) { results.push("LEM ✗ " + e.message); }
+    }
+    // Test Management key
+    if (cfg.managementApiKey) {
+      try {
+        const base = env === "live" ? "https://management-live.adyen.com/v3" : "https://management-test.adyen.com/v3";
+        const res  = await fetch(proxy + encodeURIComponent(base + "/companies?pageSize=1"), { headers: { "X-API-Key": cfg.managementApiKey } });
+        const data = await res.json();
+        results.push(res.ok ? "Management ✓" : "Management ✗ " + (data?.detail || data?.message || "HTTP " + res.status));
+      } catch(e) { results.push("Management ✗ " + e.message); }
+    }
+    const allOk = results.every(r => r.includes("✓"));
+    setTestResult({ ok: allOk, msg: results.join("  ·  ") });
     setTesting(false);
   };
 
@@ -1829,19 +1859,28 @@ function AdyenConfigSection() {
         </div>
         <div style={rowStyle}>
           <label style={lbl}>Company ID</label>
-          <input value={cfg.companyId||""} onChange={e=>upd("companyId",e.target.value)} placeholder="e.g. AIOAppInc" style={inp}/>
+          <input value={cfg.companyId||""} onChange={e=>upd("companyId",e.target.value)} placeholder="AIOAppInc" style={inp}/>
+          <span style={{fontSize:11,color:T.muted}}>Your top-level company account ID in Adyen</span>
         </div>
         <div style={rowStyle}>
-          <label style={lbl}>LEM API Key (Legal Entity Mgmt)</label>
-          <input type="password" value={cfg.lemApiKey||""} onChange={e=>upd("lemApiKey",e.target.value)} placeholder="CRED42..." style={inp}/>
+          <label style={lbl}>Balance Platform API Key</label>
+          <input type="password" value={cfg.balancePlatformApiKey||""} onChange={e=>upd("balancePlatformApiKey",e.target.value)} placeholder="AQE..." style={inp}/>
+          <span style={{fontSize:11,color:T.muted}}>Adyen Dashboard → API Credentials → <strong>Platforms tab → Web service user</strong></span>
+        </div>
+        <div style={rowStyle}>
+          <label style={lbl}>LEM API Key</label>
+          <input type="password" value={cfg.lemApiKey||""} onChange={e=>upd("lemApiKey",e.target.value)} placeholder="AQE..." style={inp}/>
+          <span style={{fontSize:11,color:T.muted}}>Adyen Dashboard → API Credentials → <strong>Platforms tab → LEM user</strong></span>
         </div>
         <div style={rowStyle}>
           <label style={lbl}>Management API Key</label>
-          <input type="password" value={cfg.managementApiKey||""} onChange={e=>upd("managementApiKey",e.target.value)} placeholder="CRED42..." style={inp}/>
+          <input type="password" value={cfg.managementApiKey||""} onChange={e=>upd("managementApiKey",e.target.value)} placeholder="AQE..." style={inp}/>
+          <span style={{fontSize:11,color:T.muted}}>Adyen Dashboard → API Credentials → <strong>Payments tab → Web service user</strong></span>
         </div>
-        <div style={{...rowStyle,gridColumn:"span 2"}}>
-          <label style={lbl}>CORS Proxy URL (required for browser calls)</label>
+        <div style={rowStyle}>
+          <label style={lbl}>CORS Proxy URL</label>
           <input value={cfg.corsProxy||"https://corsproxy.io/?"} onChange={e=>upd("corsProxy",e.target.value)} placeholder="https://corsproxy.io/?" style={inp}/>
+          <span style={{fontSize:11,color:T.muted}}>Required for direct browser API calls — use your own proxy in production</span>
         </div>
       </div>
 
