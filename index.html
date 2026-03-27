@@ -43,6 +43,27 @@ function parseJSON(text) {
   return null;
 }
 
+// ─── AIO Margin Requirements (sourced from AIO Payments Margin Requirements.xlsx) ─
+const MARGIN_REQS = [
+  { maxVol: 20000,   takeRate: 0.015,  minMRR: 300    },
+  { maxVol: 50000,   takeRate: 0.006,  minMRR: 300    },
+  { maxVol: 75000,   takeRate: 0.005,  minMRR: 375    },
+  { maxVol: 100000,  takeRate: 0.004,  minMRR: 400    },
+  { maxVol: 125000,  takeRate: 0.0035, minMRR: 437.5  },
+  { maxVol: 150000,  takeRate: 0.003,  minMRR: 450    },
+  { maxVol: 175000,  takeRate: 0.0025, minMRR: 437.5  },
+  { maxVol: 200000,  takeRate: 0.002,  minMRR: 400    },
+  { maxVol: 250000,  takeRate: 0.0018, minMRR: 450    },
+  { maxVol: 300000,  takeRate: 0.0016, minMRR: 480    },
+  { maxVol: 350000,  takeRate: 0.0014, minMRR: 490    },
+  { maxVol: 400000,  takeRate: 0.0012, minMRR: 480    },
+  { maxVol: 500000,  takeRate: 0.001,  minMRR: 500    },
+  { maxVol: Infinity,takeRate: 0.0008, minMRR: 480    },
+];
+function getMarginFloor(monthlyVolume) {
+  return MARGIN_REQS.find(t => monthlyVolume <= t.maxVol) || MARGIN_REQS[MARGIN_REQS.length - 1];
+}
+
 function calcAdyenCost(tier, volume, txnCount) {
   if (!tier) return 0;
   return volume * (tier.processingBps || 0) + txnCount * (tier.perTxnFee || 0) + volume * (tier.schemeBps || 0) + (tier.monthlyFee || 0);
@@ -103,6 +124,14 @@ function App() {
   useEffect(() => {
     loadSettings().then(s => { setSettings(s); setSettingsLoaded(true); });
   }, []);
+
+  // Snap targetMargin up to AIO floor whenever analysis changes
+  useEffect(() => {
+    if (analysis) {
+      const floor = getMarginFloor(analysis.totalVolume || 0);
+      setTargetMargin(prev => Math.max(prev, floor.takeRate));
+    }
+  }, [analysis]);
 
   const persistSettings = (updated) => {
     setSettings(updated);
@@ -1264,6 +1293,10 @@ function PricingStep({ analysis, activeTier, activeProcessor, adyenCostRate, tar
   const netMargin = targetMargin - adyenCostRate;
   const belowFloor = netMargin < 0;
 
+  // AIO minimum margin requirement for this volume
+  const marginReq   = getMarginFloor(vol);
+  const belowAIOMin = targetMargin < marginReq.takeRate;
+
   // ── Derived rates from fee overrides ──────────────────────────────────────
   // For flat-rate: targetMargin = flatRate - icRate, but we also need to absorb
   // monthly fee and per-txn fee. Solve for the % rate that achieves targetMargin.
@@ -1377,12 +1410,18 @@ function PricingStep({ analysis, activeTier, activeProcessor, adyenCostRate, tar
         <h2 style={S.h2}>Target Gross Margin Above Interchange</h2>
         <div style={S.sliderBox}>
           <div style={{textAlign:"center",marginBottom:20}}>
-            <span style={{fontSize:52,fontWeight:800,color:T.accent,display:"block"}}>{fmtPct2(targetMargin)}</span>
+            <span style={{fontSize:52,fontWeight:800,color:belowAIOMin?T.red:T.accent,display:"block"}}>{fmtPct2(targetMargin)}</span>
             <span style={{fontSize:13,color:T.muted}}>gross margin above interchange</span>
+            {belowAIOMin && <span style={{fontSize:12,color:T.red,display:"block",marginTop:4}}>↑ Below AIO minimum — must be at least {fmtPct2(marginReq.takeRate)}</span>}
           </div>
-          <input type="range" min="0.001" max="0.02" step="0.0005" value={targetMargin} onChange={e=>setTargetMargin(parseFloat(e.target.value))} style={S.slider}/>
-          <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:T.muted,marginTop:6,marginBottom:24}}>
-            <span>0.10% (aggressive)</span><span>2.00% (premium)</span>
+          <input type="range" min={Math.max(0.001, marginReq.takeRate)} max="0.02" step="0.0001" value={targetMargin} onChange={e=>setTargetMargin(parseFloat(e.target.value))} style={S.slider}/>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:T.muted,marginTop:6,marginBottom:8}}>
+            <span style={{color:T.gold}}>▲ {fmtPct2(marginReq.takeRate)} AIO min</span><span>2.00% (premium)</span>
+          </div>
+          {/* AIO Minimum floor callout */}
+          <div style={{padding:"10px 14px",background:`${T.gold}08`,border:`1px solid ${T.gold}25`,borderRadius:8,fontSize:12,color:T.gold,marginBottom:16,display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap"}}>
+            <span>AIO Minimum for {fmt$(vol)}/mo volume: <strong>{fmtPct2(marginReq.takeRate)}</strong> take rate · <strong>{fmt$(marginReq.minMRR)}</strong> min MRR</span>
+            {belowAIOMin && <button onClick={()=>setTargetMargin(marginReq.takeRate)} style={{background:T.gold,color:"#000",border:"none",borderRadius:6,padding:"5px 12px",fontSize:11,fontWeight:700,cursor:"pointer",flexShrink:0}}>Snap to Minimum</button>}
           </div>
           {activeTier && belowFloor && (
             <div style={S.floorAlert}><span style={{fontSize:18}}>⚠</span><div><div style={{fontWeight:700,color:T.red,marginBottom:4}}>Below Cost Floor</div><div style={{fontSize:13}}>Your gross margin ({fmtPct2(targetMargin)}) is below your {activeProcessor?.name} cost ({fmtPct2(adyenCostRate)}). You'd lose money on this deal.</div></div></div>
@@ -1399,7 +1438,11 @@ function PricingStep({ analysis, activeTier, activeProcessor, adyenCostRate, tar
               </div>
             </>)}
             <div style={{...S.msRow,...S.msTotal}}><div style={S.msLabel}>= Your Net Margin</div><div style={{...S.msVal,color:belowFloor?T.red:T.green,fontSize:20,fontWeight:800}}>{fmtPct2(netMargin)}</div><div style={{...S.msMoney,color:belowFloor?T.red:T.green,fontWeight:700}}>{fmt$(vol*netMargin)}/mo</div></div>
-            <div style={S.msArrRow}><span style={S.msArrLabel}>Net ARR</span>                  <span style={{...S.msArrVal,color:belowFloor?T.red:T.blue}}>{fmt$(annVol*netMargin)}</span></div>
+            <div style={S.msArrRow}><span style={S.msArrLabel}>Net ARR</span><span style={{...S.msArrVal,color:belowFloor?T.red:T.blue}}>{fmt$(annVol*netMargin)}</span></div>
+            <div style={{marginTop:10,padding:"8px 12px",background:belowAIOMin?`${T.red}10`:`${T.gold}08`,border:`1px solid ${belowAIOMin?T.red:T.gold}30`,borderRadius:8,display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:12}}>
+              <span style={{color:T.gold}}>AIO Minimum Take Rate</span>
+              <span style={{color:belowAIOMin?T.red:T.gold,fontWeight:700}}>{fmtPct2(marginReq.takeRate)} · {fmt$(marginReq.minMRR)}/mo MRR floor</span>
+            </div>
           </div>
         </div>
       </div>
@@ -1540,7 +1583,8 @@ function PricingStep({ analysis, activeTier, activeProcessor, adyenCostRate, tar
 
       <div style={S.btnRow}>
         <button style={{...S.btn,...S.btnSecondary}} onClick={onBack}>← Back</button>
-        <button style={{...S.btn,...S.btnPrimary,opacity:(pricingModel&&!belowFloor)?1:0.4}} disabled={!pricingModel||belowFloor||loading} onClick={onGenerate}>Generate Proposal →</button>
+        <button style={{...S.btn,...S.btnPrimary,opacity:(pricingModel&&!belowFloor&&!belowAIOMin)?1:0.4}} disabled={!pricingModel||belowFloor||belowAIOMin||loading} onClick={onGenerate}>Generate Proposal →</button>
+        {belowAIOMin && <span style={{fontSize:12,color:T.red,alignSelf:"center"}}>⚠ Set margin ≥ {fmtPct2(marginReq.takeRate)} to proceed</span>}
       </div>
     </div>
   );

@@ -24,6 +24,27 @@
 <script type="text/babel">
 const {useState,useRef,useCallback} = React;
 
+// ─── AIO Margin Requirements ─────────────────────────────────────────────────
+const MARGIN_REQS = [
+  { maxVol: 20000,    takeRate: 0.015,  minMRR: 300    },
+  { maxVol: 50000,    takeRate: 0.006,  minMRR: 300    },
+  { maxVol: 75000,    takeRate: 0.005,  minMRR: 375    },
+  { maxVol: 100000,   takeRate: 0.004,  minMRR: 400    },
+  { maxVol: 125000,   takeRate: 0.0035, minMRR: 437.5  },
+  { maxVol: 150000,   takeRate: 0.003,  minMRR: 450    },
+  { maxVol: 175000,   takeRate: 0.0025, minMRR: 437.5  },
+  { maxVol: 200000,   takeRate: 0.002,  minMRR: 400    },
+  { maxVol: 250000,   takeRate: 0.0018, minMRR: 450    },
+  { maxVol: 300000,   takeRate: 0.0016, minMRR: 480    },
+  { maxVol: 350000,   takeRate: 0.0014, minMRR: 490    },
+  { maxVol: 400000,   takeRate: 0.0012, minMRR: 480    },
+  { maxVol: 500000,   takeRate: 0.001,  minMRR: 500    },
+  { maxVol: Infinity, takeRate: 0.0008, minMRR: 480    },
+];
+function getMarginFloor(vol) {
+  return MARGIN_REQS.find(t => vol <= t.maxVol) || MARGIN_REQS[MARGIN_REQS.length - 1];
+}
+
 const fmt$ = n => new Intl.NumberFormat("en-US",{style:"currency",currency:"USD",maximumFractionDigits:0}).format(n||0);
 const fmtPct = n => `${((n||0)*100).toFixed(2)}%`;
 
@@ -477,17 +498,27 @@ Never use null — use 0 for missing numbers. Rates as decimals (0.027 = 2.7%).`
       if(!parsed) throw new Error("Could not read statement data. Please try a clearer PDF.");
 
       // Quote calculation: save merchant 25% of what processor earns above interchange
+      const vol             = parsed.totalVolume || 0;
       const processorMargin = (parsed.processorFees||0) + (parsed.otherFees||0);
       const targetSavings   = processorMargin * 0.25;
-      const newMonthlyCost  = (parsed.totalFees||0) - targetSavings;
-      const flatRate        = (parsed.totalVolume||0) > 0 ? newMonthlyCost / parsed.totalVolume : 0;
-      const savingsPct      = (parsed.totalFees||0) > 0 ? targetSavings / parsed.totalFees : 0;
+      let   proposedCost    = (parsed.totalFees||0) - targetSavings;
+
+      // Enforce AIO minimum take rate — never quote below our margin floor
+      const marginFloor     = getMarginFloor(vol);
+      const minFlatRate     = (parsed.interchangeRate||0) + marginFloor.takeRate;
+      const minCostByRate   = vol > 0 ? minFlatRate * vol : proposedCost;
+      const minCostByMRR    = marginFloor.minMRR + (parsed.interchangeFees||0);
+      proposedCost          = Math.max(proposedCost, minCostByRate, minCostByMRR);
+
+      const flatRate        = vol > 0 ? proposedCost / vol : 0;
+      const actualSavings   = (parsed.totalFees||0) - proposedCost;
+      const savingsPct      = (parsed.totalFees||0) > 0 ? actualSavings / (parsed.totalFees||0) : 0;
       const isRef           = savingsPct < 0.05;
 
       const quoteData = isRef
         ? { type:"referral" }
-        : { type:"quote", flatRate, monthlyCost:newMonthlyCost, annualCost:newMonthlyCost*12,
-            savings:{ monthly:targetSavings, annual:targetSavings*12, pct:savingsPct } };
+        : { type:"quote", flatRate, monthlyCost:proposedCost, annualCost:proposedCost*12,
+            savings:{ monthly:actualSavings, annual:actualSavings*12, pct:savingsPct } };
 
       // Save submission to localStorage for admin page
       const submission = {
