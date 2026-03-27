@@ -167,37 +167,120 @@ function App() {
           model: "claude-sonnet-4-20250514", max_tokens: 1000,
           messages: [{ role: "user", content: [
             { type: isImage ? "image" : "document", source: { type: "base64", media_type: isImage ? file.type : "application/pdf", data: fileData } },
-            { type: "text", text: `Analyze this merchant statement. Return ONLY JSON (no markdown):
-{"merchantName":"string","processingMonth":"string","totalVolume":number,"totalTransactions":number,"totalFees":number,"interchangeFees":number,"processorFees":number,"otherFees":number,"effectiveRate":number,"interchangeRate":number,"processorMarkup":number,"averageTicket":number,"cardPresentVolume":number,"cardNotPresentVolume":number,"cardPresentPct":number,"cardNotPresentPct":number,"visaVolume":number,"mastercardVolume":number,"amexVolume":number,"discoverVolume":number,"rewardCardPct":number,"corporateCardPct":number,"currentPricingModel":"tiered|interchange-plus|flat-rate|unknown","currentProcessorName":"string","annualVolume":number,"confidence":"high|medium|low","notes":"string"}
-Use 0 for unknown numerics.` }
+            { type: "text", text: `Analyze this merchant processing statement. Return ONLY valid JSON — no markdown, no explanation.
+
+FIELDS:
+{
+  "merchantName": string,
+  "processingMonth": string,
+  "totalVolume": number (total card volume processed this month in USD),
+  "totalTransactions": number,
+  "totalFees": number (ONLY the fees actually shown on this statement — see rules below),
+  "interchangeFees": number (interchange/network fees in USD if shown; 0 if NOT shown),
+  "processorFees": number (processor markup fees — see rules below),
+  "otherFees": number (monthly fee, PCI fee, statement fee, misc — USD),
+  "effectiveRate": number (totalFees / totalVolume as decimal),
+  "interchangeRate": number (interchangeFees / totalVolume; 0 if interchange not shown),
+  "processorMarkup": number (the markup RATE as decimal e.g. 0.0025 for 0.25% — NOT a dollar amount),
+  "statedMarkupRate": number (the explicit % markup rate printed on the statement, as decimal; 0 if not stated),
+  "statedPerTxnFee": number (the explicit per-transaction fee printed on the statement in USD; 0 if not stated),
+  "interchangeNotShown": boolean (true if this is IC+ but interchange fees are NOT itemized on the statement),
+  "averageTicket": number,
+  "cardPresentVolume": number,
+  "cardNotPresentVolume": number,
+  "cardPresentPct": number,
+  "cardNotPresentPct": number,
+  "visaVolume": number,
+  "mastercardVolume": number,
+  "amexVolume": number,
+  "discoverVolume": number,
+  "rewardCardPct": number,
+  "corporateCardPct": number,
+  "currentPricingModel": "tiered|interchange-plus|flat-rate|unknown",
+  "currentProcessorName": string,
+  "annualVolume": number,
+  "confidence": "high|medium|low",
+  "notes": string
+}
+
+CRITICAL RULES — READ CAREFULLY:
+
+RULE 1 — IC+ STATEMENTS WHERE INTERCHANGE IS NOT SHOWN (e.g. Toast, some Heartland/TSYS):
+Many IC+ processors show ONLY the markup fees on the statement and pass interchange through separately.
+If this is interchange-plus pricing AND interchange is NOT itemized on this statement:
+  • Set interchangeNotShown = true
+  • Set interchangeFees = 0 and interchangeRate = 0
+  • processorFees = ONLY the markup dollar amount = totalVolume × statedMarkupRate + totalTransactions × statedPerTxnFee
+    (Calculate this from the rates shown — do NOT use any "total fees" line that might include interchange)
+  • totalFees = processorFees + otherFees (DO NOT include interchange since it is not on this statement)
+  • effectiveRate = totalFees / totalVolume (this will only reflect the markup portion, NOT total cost)
+  • statedMarkupRate = the % markup rate shown (e.g. 0.0025 for 0.25%)
+  • statedPerTxnFee = the per-txn fee shown (e.g. 0.10)
+
+RULE 2 — IC+ STATEMENTS WHERE INTERCHANGE IS SHOWN:
+  • Set interchangeNotShown = false
+  • interchangeFees = the interchange dollar amount shown
+  • processorFees = fees shown ABOVE interchange (markup fees only)
+  • totalFees = interchangeFees + processorFees + otherFees
+
+RULE 3 — FLAT-RATE OR TIERED STATEMENTS:
+  • Set interchangeNotShown = false
+  • totalFees = all fees on the statement
+  • processorFees = totalFees - otherFees (interchange is bundled in, cannot separate)
+  • interchangeFees = 0
+
+RULE 4 — processorMarkup is always a RATE (decimal), never a dollar amount.
+  e.g. 0.25% = 0.0025, 1.5% = 0.015
+
+Use 0 for unknown numerics. Never null.` }
           ]}]
         })
       });
       const data = await res.json();
       const parsed = parseJSON(data.content?.map(b => b.text || "").join("") || "");
       if (parsed) {
-        // Normalize: if any rate field looks like a percentage (>0.5) convert to decimal
-        const rateFields = ["effectiveRate","interchangeRate","processorMarkup","cardPresentPct","cardNotPresentPct","rewardCardPct","corporateCardPct"];
+        // Normalize rate fields: >0.5 is likely a percentage integer, convert to decimal
+        const rateFields = ["effectiveRate","interchangeRate","processorMarkup","statedMarkupRate","cardPresentPct","cardNotPresentPct","rewardCardPct","corporateCardPct"];
         rateFields.forEach(f => {
           if (parsed[f] != null && parsed[f] > 0.5) parsed[f] = parsed[f] / 100;
         });
-        // Volume-derived pcts: recalculate from volumes if total is available
-        if (parsed.totalVolume > 0) {
-          if (parsed.cardPresentVolume > 0)   parsed.cardPresentPct   = parsed.cardPresentVolume   / parsed.totalVolume;
-          if (parsed.cardNotPresentVolume > 0) parsed.cardNotPresentPct = parsed.cardNotPresentVolume / parsed.totalVolume;
-          // Sanity-check pct fields — if still > 1 after normalization, zero them
+
+        const vol  = parsed.totalVolume  || 0;
+        const txns = parsed.totalTransactions || 0;
+
+        // ── IC+ WITHOUT INTERCHANGE SHOWN (e.g. Toast) ─────────────────────
+        // Re-derive processorFees from the stated markup rates to prevent
+        // the AI from accidentally including interchange in the markup number.
+        if (parsed.interchangeNotShown && vol > 0) {
+          const markupRate   = parsed.statedMarkupRate  || parsed.processorMarkup || 0;
+          const perTxnFee    = parsed.statedPerTxnFee   || 0;
+          // Hard-recalculate markup fees from the printed rates
+          const calcMarkup   = vol * markupRate + txns * perTxnFee;
+          if (calcMarkup > 0) parsed.processorFees = calcMarkup;
+          parsed.interchangeFees = 0;
+          parsed.interchangeRate = 0;
+          parsed.processorMarkup = markupRate;
+          // totalFees = only what appears on the statement (markup + other)
+          parsed.totalFees = parsed.processorFees + (parsed.otherFees || 0);
+        }
+
+        // Volume-derived pcts
+        if (vol > 0) {
+          if (parsed.cardPresentVolume    > 0) parsed.cardPresentPct    = parsed.cardPresentVolume    / vol;
+          if (parsed.cardNotPresentVolume > 0) parsed.cardNotPresentPct = parsed.cardNotPresentVolume / vol;
           ["cardPresentPct","cardNotPresentPct","rewardCardPct","corporateCardPct"].forEach(f => {
             if (parsed[f] > 1) parsed[f] = 0;
           });
-          // Recalculate effective rate from actual numbers as a cross-check
-          if (parsed.totalFees > 0) {
-            const derived = parsed.totalFees / parsed.totalVolume;
-            // If AI rate is wildly off from derived, trust the derived value
+          // Cross-check effective rate (skip when interchange not shown — it will look low by design)
+          if (parsed.totalFees > 0 && !parsed.interchangeNotShown) {
+            const derived = parsed.totalFees / vol;
             if (Math.abs((parsed.effectiveRate || 0) - derived) > 0.01) parsed.effectiveRate = derived;
+          } else if (parsed.totalFees > 0) {
+            parsed.effectiveRate = parsed.totalFees / vol;
           }
-          // Same cross-check for interchange
+          // Cross-check interchange rate
           if (parsed.interchangeFees > 0) {
-            const derivedIC = parsed.interchangeFees / parsed.totalVolume;
+            const derivedIC = parsed.interchangeFees / vol;
             if (Math.abs((parsed.interchangeRate || 0) - derivedIC) > 0.01) parsed.interchangeRate = derivedIC;
           }
         }
@@ -404,8 +487,30 @@ Return ONLY JSON (no markdown, all rate fields as decimals e.g. 0.0272 not 2.72)
                   </div>
                   <div style={S.badge}>{analysis.currentPricingModel?.replace("-"," ").toUpperCase()}</div>
                 </div>
+                {/* ── Interchange-not-shown banner ── */}
+                {analysis.interchangeNotShown && (
+                  <div style={{margin:"12px 0",padding:"12px 16px",background:"#1e1b4b",border:"1px solid #6366f180",borderRadius:10,display:"flex",gap:12,alignItems:"flex-start"}}>
+                    <span style={{fontSize:18,flexShrink:0}}>ℹ️</span>
+                    <div>
+                      <div style={{fontSize:13,fontWeight:700,color:"#a5b4fc",marginBottom:3}}>
+                        IC+ Statement — Interchange Not Shown ({analysis.currentProcessorName})
+                      </div>
+                      <div style={{fontSize:12,color:"#94a3b8",lineHeight:1.6}}>
+                        This statement only shows the processor markup ({analysis.statedMarkupRate > 0 ? fmtPct2(analysis.statedMarkupRate) : "stated rate"} + ${(analysis.statedPerTxnFee||0).toFixed(2)}/txn).
+                        Interchange is passed through separately and is <strong style={{color:"#c7d2fe"}}>not included in the fee totals below</strong>.
+                        The true all-in cost to this merchant is interchange (typically 1.5%–2.2%) <em>plus</em> the markup shown.
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 <div style={S.grid4}>
-                  {[{label:"Monthly Volume",val:fmt$(analysis.totalVolume)},{label:"Total Fees",val:fmt$(analysis.totalFees),accent:true},{label:"Effective Rate",val:fmtPct2(analysis.effectiveRate),accent:true},{label:"Avg Ticket",val:fmt$(analysis.averageTicket)}].map(m=>(
+                  {[
+                    {label:"Monthly Volume",        val:fmt$(analysis.totalVolume)},
+                    {label: analysis.interchangeNotShown ? "Markup Fees (Shown)" : "Total Fees", val:fmt$(analysis.totalFees), accent:true},
+                    {label: analysis.interchangeNotShown ? "Markup Rate Only"    : "Effective Rate", val:fmtPct2(analysis.effectiveRate), accent:true},
+                    {label:"Avg Ticket",             val:fmt$(analysis.averageTicket)},
+                  ].map(m=>(
                     <div key={m.label} style={{...S.metricCard,...(m.accent?S.metricAccent:{})}}><div style={S.metricVal}>{m.val}</div><div style={S.metricLbl}>{m.label}</div></div>
                   ))}
                 </div>
@@ -420,16 +525,21 @@ Return ONLY JSON (no markdown, all rate fields as decimals e.g. 0.0272 not 2.72)
                     const totalMarkup = myMarkup+(analysis.otherFees||0);
                     const totalMarkupRate = totalMarkup/(analysis.totalVolume||1);
                     const rows=[
-                      {name:"Interchange",note:"Card network cost — non-negotiable",amt:analysis.interchangeFees,rate:analysis.interchangeRate,color:"#3b82f6"},
+                      {name:"Interchange",note:analysis.interchangeNotShown?"Not itemized on this statement — passed through separately":"Card network cost — non-negotiable",amt:analysis.interchangeFees,rate:analysis.interchangeRate,color:"#3b82f6",dim:analysis.interchangeNotShown},
                       {name:`${activeProcessor.name} Cost`,note:"Your acquirer cost — processing + txn + scheme",amt:adyenCost,rate:adyenRate,color:T.gold},
                       {name:"Your Markup",note:"Processor markup above interchange & acquirer",amt:myMarkup,rate:myRate,color:T.green},
                       {name:"Other Fees",note:"Monthly, PCI, misc. — pure margin, no cost to you",amt:analysis.otherFees,rate:(analysis.otherFees||0)/(analysis.totalVolume||1),color:T.green},
                     ];
                     return(<div style={S.feeTable}>
-                      {rows.map(r=>(<div key={r.name} style={S.feeRow}>
-                        <div style={S.feeName}><span style={{color:r.color,fontWeight:600}}>{r.name}</span><span style={S.feeNote}>{r.note}</span></div>
-                        <div style={S.feeAmt}>{fmt$(r.amt)}</div><div style={S.feeRate}>{fmtPct(r.rate)}</div>
-                        <div style={S.feeBar}><div style={{...S.feeBarFill,width:`${Math.min(((r.amt||0)/(analysis.totalFees||1))*100,100)}%`,background:r.color}}/></div>
+                      {rows.map(r=>(<div key={r.name} style={{...S.feeRow,opacity:r.dim?0.45:1}}>
+                        <div style={S.feeName}>
+                          <span style={{color:r.color,fontWeight:600}}>{r.name}</span>
+                          {r.dim && <span style={{fontSize:10,color:"#6366f1",background:"#1e1b4b",borderRadius:4,padding:"1px 6px",marginLeft:6,fontWeight:600}}>NOT SHOWN</span>}
+                          <span style={S.feeNote}>{r.note}</span>
+                        </div>
+                        <div style={S.feeAmt}>{r.dim ? "—" : fmt$(r.amt)}</div>
+                        <div style={S.feeRate}>{r.dim ? "—" : fmtPct(r.rate)}</div>
+                        <div style={S.feeBar}><div style={{...S.feeBarFill,width:r.dim?0:`${Math.min(((r.amt||0)/(analysis.totalFees||1))*100,100)}%`,background:r.color}}/></div>
                       </div>))}
                       <div style={{...S.feeRow,background:`${T.green}08`,borderTop:`2px solid ${T.green}30`}}>
                         <div style={S.feeName}><span style={{color:T.green,fontWeight:700}}>Total Margin Opportunity</span><span style={S.feeNote}>Everything above interchange & acquirer cost</span></div>
