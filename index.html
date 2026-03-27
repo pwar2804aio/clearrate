@@ -27,7 +27,7 @@
     const { useState, useRef, useEffect } = React;
 
 
-const STEPS = ["upload", "analysis", "pricing", "proposal"];
+const STEPS = ["upload", "analysis", "pricing", "proposal", "apply"];
 
 const fmt$ = (n) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(n || 0);
 const fmtPct  = (n) => `${((n || 0) * 100).toFixed(4)}%`;
@@ -304,7 +304,7 @@ Return ONLY JSON (no markdown, all rate fields as decimals e.g. 0.0272 not 2.72)
           <div style={{display:"flex",alignItems:"center",gap:24}}>
             {page === "proposal" && (
               <nav style={S.stepNav}>
-                {[{id:"upload",label:"01 Upload"},{id:"analysis",label:"02 Analysis"},{id:"pricing",label:"03 Pricing"},{id:"proposal",label:"04 Proposal"}].map(s=>(
+                {[{id:"upload",label:"01 Upload"},{id:"analysis",label:"02 Analysis"},{id:"pricing",label:"03 Pricing"},{id:"proposal",label:"04 Proposal"},{id:"apply",label:"05 Apply"}].map(s=>(
                   <div key={s.id} style={{...S.stepItem,...(step===s.id?S.stepActive:{}),...(STEPS.indexOf(step)>STEPS.indexOf(s.id)?S.stepDone:{})}}>{s.label}</div>
                 ))}
               </nav>
@@ -552,15 +552,364 @@ Return ONLY JSON (no markdown, all rate fields as decimals e.g. 0.0272 not 2.72)
                   <button style={{...S.btn,...S.btnPrimary}} onClick={()=>printProposal(proposal, analysis, activeTier, activeProcessor, targetMargin, netMargin, fmtPct2, fmt$)}>Print / Export PDF</button>
                   <button style={{...S.btn,...S.btnGhost}} onClick={()=>{setStep("upload");setFile(null);setFileData(null);setAnalysis(null);setProposal(null);setPricingModel(null);}}>New Proposal</button>
                 </div>
+                {/* Apply CTA */}
+                <div style={{marginTop:32,padding:"28px 32px",background:"linear-gradient(135deg,#0a1628,#0f1e3d)",border:`1px solid ${T.blue}30`,borderRadius:16,display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:20}}>
+                  <div>
+                    <div style={{fontSize:18,fontWeight:800,color:T.white,marginBottom:6}}>Ready to move forward?</div>
+                    <div style={{fontSize:14,color:T.muted}}>Complete the payment processing application to get {analysis.merchantName||"this merchant"} onboarded with AIO.</div>
+                  </div>
+                  <button style={{...S.btn,...S.btnPrimary,fontSize:16,padding:"16px 36px",background:"linear-gradient(135deg,#0ea5e9,#0284c7)",boxShadow:"0 6px 24px rgba(14,165,233,0.35)",flexShrink:0}} onClick={()=>setStep("apply")}>
+                    Apply for Processing →
+                  </button>
+                </div>
               </div>
           );
         })()}
+            {step === "apply" && proposal && analysis && (
+              <ApplyStep
+                analysis={analysis}
+                proposal={proposal}
+                onBack={()=>setStep("proposal")}
+                onNewProposal={()=>{setStep("upload");setFile(null);setFileData(null);setAnalysis(null);setProposal(null);setPricingModel(null);}}
+              />
+            )}
           </>
         )}
       </main>
     </div>
   );
 }
+
+// ─── Apply Step ───────────────────────────────────────────────────────────────
+function ApplyStep({ analysis, proposal, onBack, onNewProposal }) {
+  const fmtPct2 = n => `${((n||0)*100).toFixed(2)}%`;
+  const fmt$    = n => new Intl.NumberFormat("en-US",{style:"currency",currency:"USD",maximumFractionDigits:0}).format(n||0);
+
+  const vol = analysis.totalVolume || 0;
+  const savingsAnnual = ((analysis.totalFees||0) - (proposal.projectedFees?.monthly||0)) * 12;
+
+  const [submitted, setSubmitted] = useState(false);
+  const [section, setSection] = useState(0); // 0–4
+
+  const [biz, setBiz] = useState({
+    legalName: analysis.merchantName || "",
+    dba: analysis.merchantName || "",
+    bizType: "llc",
+    address: "", city: "", state: "", zip: "",
+    phone: "", website: "",
+    yearsInBusiness: "", annualRevenue: String(Math.round((vol||0)*12)),
+    taxId: "",
+  });
+  const [owner, setOwner] = useState({
+    firstName: "", lastName: "", title: "Owner",
+    email: "", phone: "", dob: "", ssn: "", ownershipPct: "100",
+    address: "", city: "", state: "", zip: "",
+  });
+  const [processing, setProcessing] = useState({
+    monthlyVolume: String(Math.round(vol||0)),
+    avgTicket: String(Math.round(analysis.averageTicket||0)),
+    cardPresentPct: String(Math.round((analysis.cardPresentPct||0.7)*100)),
+    mcc: "", businessDescription: "",
+    previouslyTerminated: "no", bankruptcy: "no",
+    currentProcessor: analysis.currentProcessorName || "",
+  });
+  const [banking, setBanking] = useState({
+    bankName: "", accountType: "checking",
+    routingNumber: "", accountNumber: "", accountConfirm: "",
+  });
+  const [agreement, setAgreement] = useState({
+    sigName: "", sigDate: new Date().toISOString().slice(0,10),
+    termsAccepted: false, electronicConsentAccepted: false,
+  });
+
+  const sections = [
+    { title: "Business Information",   icon: "🏢" },
+    { title: "Owner Information",      icon: "👤" },
+    { title: "Processing Details",     icon: "💳" },
+    { title: "Banking Information",    icon: "🏦" },
+    { title: "Agreement & Signature",  icon: "✍️"  },
+  ];
+
+  const inp = (val, setter, key, placeholder, type="text", opts=null) => (
+    opts ? (
+      <select value={val[key]} onChange={e=>setter(p=>({...p,[key]:e.target.value}))} style={AS.input}>
+        {opts.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}
+      </select>
+    ) : (
+      <input type={type} placeholder={placeholder} value={val[key]}
+        onChange={e=>setter(p=>({...p,[key]:e.target.value}))}
+        style={AS.input}
+        onFocus={e=>e.target.style.borderColor="#0ea5e9"}
+        onBlur={e=>e.target.style.borderColor="#1e2d45"}
+      />
+    )
+  );
+
+  const field = (label, val, setter, key, placeholder, type="text", opts=null, span=1) => (
+    <div key={key} style={{gridColumn:`span ${span}`}}>
+      <label style={AS.label}>{label}</label>
+      {inp(val, setter, key, placeholder, type, opts)}
+    </div>
+  );
+
+  const handleSubmit = () => {
+    const app = {
+      id: Date.now(),
+      submittedAt: new Date().toISOString(),
+      merchantName: biz.dba || biz.legalName,
+      analysis,
+      proposal,
+      savingsAnnual,
+      business: biz, owner, processing, banking: { ...banking, accountNumber: "****"+banking.accountNumber.slice(-4), accountConfirm: undefined },
+      agreement: { sigName: agreement.sigName, sigDate: agreement.sigDate },
+    };
+    try {
+      const existing = JSON.parse(localStorage.getItem("aio_applications")||"[]");
+      existing.unshift(app);
+      localStorage.setItem("aio_applications", JSON.stringify(existing.slice(0,500)));
+    } catch {}
+    setSubmitted(true);
+  };
+
+  if (submitted) return (
+    <div style={{...S.panel, textAlign:"center", paddingTop:60, paddingBottom:60}}>
+      <div style={{fontSize:72, marginBottom:24}}>🎉</div>
+      <div style={{fontSize:28,fontWeight:900,color:"#fff",marginBottom:12,letterSpacing:"-0.5px"}}>Application Submitted!</div>
+      <div style={{fontSize:16,color:T.muted,maxWidth:480,margin:"0 auto 36px",lineHeight:1.7}}>
+        {biz.dba||biz.legalName}'s payment processing application has been received. Our team will review and reach out within 1–2 business days to complete onboarding.
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:12,maxWidth:440,margin:"0 auto 40px"}}>
+        {[
+          {icon:"⚡",text:`Quoted rate: ${fmtPct2(proposal.projectedFees?.monthly/vol||0)} effective rate`},
+          {icon:"💰",text:`Estimated savings: ${fmt$(savingsAnnual)}/year`},
+          {icon:"📧",text:`Confirmation sent to: ${owner.email||"your team"}`},
+        ].map((r,i)=>(
+          <div key={i} style={{display:"flex",alignItems:"center",gap:12,background:"#0f1628",border:"1px solid #1e2d45",borderRadius:10,padding:"14px 18px",textAlign:"left"}}>
+            <span style={{fontSize:20}}>{r.icon}</span>
+            <span style={{fontSize:14,color:"#e2e8f0"}}>{r.text}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{display:"flex",gap:12,justifyContent:"center",flexWrap:"wrap"}}>
+        <button style={{...S.btn,...S.btnSecondary}} onClick={()=>setSubmitted(false)}>← View Application</button>
+        <button style={{...S.btn,...S.btnPrimary}} onClick={onNewProposal}>Start New Proposal</button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={S.panel}>
+      {/* Header */}
+      <div style={{marginBottom:36}}>
+        <div style={{fontSize:12,color:T.muted,marginBottom:6,textTransform:"uppercase",letterSpacing:1,fontWeight:600}}>Payment Processing Application</div>
+        <h1 style={{...S.h1,marginBottom:10}}>{biz.dba||analysis.merchantName||"Merchant"}</h1>
+        <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
+          <div style={{fontSize:13,color:T.muted}}>Proposed rate: <span style={{color:"#0ea5e9",fontWeight:700}}>{fmtPct2((proposal.projectedFees?.monthly||0)/(vol||1))}</span></div>
+          <div style={{fontSize:13,color:T.muted}}>Annual savings: <span style={{color:T.green,fontWeight:700}}>{fmt$(savingsAnnual)}</span></div>
+          <div style={{fontSize:13,color:T.muted}}>Pricing model: <span style={{color:"#e2e8f0",fontWeight:600,textTransform:"capitalize"}}>{proposal.pricingModel}</span></div>
+        </div>
+      </div>
+
+      {/* Section tabs */}
+      <div style={{display:"flex",gap:4,marginBottom:32,flexWrap:"wrap"}}>
+        {sections.map((s,i)=>(
+          <button key={i} onClick={()=>setSection(i)}
+            style={{background:section===i?"#0ea5e9":i<section?"#052e16":"#0f1628",
+              color:section===i?"#fff":i<section?T.green:T.muted,
+              border:`1px solid ${section===i?"#0ea5e9":i<section?T.green+"40":"#1e2d45"}`,
+              borderRadius:8,padding:"8px 14px",fontSize:12,fontWeight:700,cursor:"pointer",
+              display:"flex",alignItems:"center",gap:6}}>
+            {i<section&&<span style={{color:T.green}}>✓</span>} {s.icon} {s.title}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Section 0: Business ── */}
+      {section === 0 && (
+        <div>
+          <h2 style={AS.sectionTitle}>Business Information</h2>
+          <div style={AS.grid}>
+            {field("Legal Business Name",biz,setBiz,"legalName","LLC / Corp name",undefined,undefined,2)}
+            {field("DBA (Doing Business As)",biz,setBiz,"dba","Trade name")}
+            {field("Business Type",biz,setBiz,"bizType","",undefined,[
+              {v:"llc",l:"LLC"},{v:"corp",l:"Corporation"},{v:"s-corp",l:"S-Corp"},
+              {v:"sole-prop",l:"Sole Proprietor"},{v:"partnership",l:"Partnership"},{v:"non-profit",l:"Non-Profit"}
+            ])}
+            {field("Federal Tax ID (EIN)",biz,setBiz,"taxId","XX-XXXXXXX")}
+            {field("Phone",biz,setBiz,"phone","(555) 000-0000","tel")}
+            {field("Website",biz,setBiz,"website","www.yourbusiness.com","url")}
+            {field("Street Address",biz,setBiz,"address","123 Main St",undefined,undefined,2)}
+            {field("City",biz,setBiz,"city","City")}
+            {field("State",biz,setBiz,"state","",undefined,[
+              {v:"",l:"Select state"},
+              ...["AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY"].map(s=>({v:s,l:s}))
+            ])}
+            {field("ZIP Code",biz,setBiz,"zip","00000")}
+            {field("Years in Business",biz,setBiz,"yearsInBusiness","e.g. 5")}
+            {field("Annual Revenue",biz,setBiz,"annualRevenue","e.g. 1200000")}
+          </div>
+        </div>
+      )}
+
+      {/* ── Section 1: Owner ── */}
+      {section === 1 && (
+        <div>
+          <h2 style={AS.sectionTitle}>Owner / Principal Information</h2>
+          <p style={{fontSize:13,color:T.muted,marginBottom:20}}>Required for identity verification. Provide info for the primary owner (25%+ ownership).</p>
+          <div style={AS.grid}>
+            {field("First Name",owner,setOwner,"firstName","First")}
+            {field("Last Name",owner,setOwner,"lastName","Last")}
+            {field("Title",owner,setOwner,"title","",undefined,[
+              {v:"Owner",l:"Owner"},{v:"CEO",l:"CEO"},{v:"President",l:"President"},
+              {v:"Partner",l:"Partner"},{v:"Director",l:"Director"},{v:"Manager",l:"Manager"}
+            ])}
+            {field("Ownership %",owner,setOwner,"ownershipPct","e.g. 100")}
+            {field("Email Address",owner,setOwner,"email","owner@business.com","email")}
+            {field("Mobile Phone",owner,setOwner,"phone","(555) 000-0000","tel")}
+            {field("Date of Birth",owner,setOwner,"dob","","date")}
+            {field("SSN (last 4 digits)",owner,setOwner,"ssn","XXXX","password")}
+            {field("Home Address",owner,setOwner,"address","123 Home St",undefined,undefined,2)}
+            {field("City",owner,setOwner,"city","City")}
+            {field("State",owner,setOwner,"state","",undefined,[
+              {v:"",l:"Select state"},
+              ...["AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY"].map(s=>({v:s,l:s}))
+            ])}
+            {field("ZIP",owner,setOwner,"zip","00000")}
+          </div>
+        </div>
+      )}
+
+      {/* ── Section 2: Processing ── */}
+      {section === 2 && (
+        <div>
+          <h2 style={AS.sectionTitle}>Processing Details</h2>
+          <div style={AS.grid}>
+            {field("Est. Monthly Volume ($)",processing,setProcessing,"monthlyVolume","e.g. 150000")}
+            {field("Average Ticket ($)",processing,setProcessing,"avgTicket","e.g. 45")}
+            {field("Card Present %",processing,setProcessing,"cardPresentPct","e.g. 80")}
+            {field("Current Processor",processing,setProcessing,"currentProcessor","e.g. Heartland")}
+            {field("MCC Code",processing,setProcessing,"mcc","e.g. 5812 (Restaurants)")}
+            {field("Business Description",processing,setProcessing,"businessDescription","Brief description of products/services sold",undefined,undefined,1)}
+            {field("Previously Terminated?",processing,setProcessing,"previouslyTerminated","",undefined,[{v:"no",l:"No"},{v:"yes",l:"Yes"}])}
+            {field("Bankruptcy in last 7 yrs?",processing,setProcessing,"bankruptcy","",undefined,[{v:"no",l:"No"},{v:"yes",l:"Yes"}])}
+          </div>
+          {/* Proposed rates summary */}
+          <div style={{marginTop:24,background:"#0f1628",border:"1px solid #1e2d45",borderRadius:12,padding:20}}>
+            <div style={{fontSize:11,color:T.muted,fontWeight:700,letterSpacing:.5,textTransform:"uppercase",marginBottom:14}}>Agreed Proposed Rates</div>
+            <div style={{display:"flex",gap:20,flexWrap:"wrap"}}>
+              {proposal.pricingModel==="flat-rate"&&<><div style={AS.rateChip}><div style={AS.rateChipVal}>{fmtPct2(proposal.proposedRates?.flatRate||0)}</div><div style={AS.rateChipLbl}>Flat Rate</div></div>{(proposal.proposedRates?.perTransaction||0)>0&&<div style={AS.rateChip}><div style={AS.rateChipVal}>${(proposal.proposedRates?.perTransaction||0).toFixed(2)}</div><div style={AS.rateChipLbl}>Per Transaction</div></div>}</>}
+              {proposal.pricingModel==="2-tier"&&<><div style={AS.rateChip}><div style={AS.rateChipVal}>{fmtPct2(proposal.proposedRates?.cardPresentRate||0)}</div><div style={AS.rateChipLbl}>Card Present</div></div><div style={AS.rateChip}><div style={AS.rateChipVal}>{fmtPct2(proposal.proposedRates?.cardNotPresentRate||0)}</div><div style={AS.rateChipLbl}>Card Not Present</div></div></>}
+              {proposal.pricingModel==="interchange-plus"&&<><div style={AS.rateChip}><div style={AS.rateChipVal}>{proposal.proposedRates?.basisPoints||0} BPS</div><div style={AS.rateChipLbl}>IC+ Markup</div></div><div style={AS.rateChip}><div style={AS.rateChipVal}>${(proposal.proposedRates?.perTransaction||0).toFixed(2)}</div><div style={AS.rateChipLbl}>Per Transaction</div></div></>}
+              {(proposal.proposedRates?.monthlyFee||0)>0&&<div style={AS.rateChip}><div style={AS.rateChipVal}>${(proposal.proposedRates?.monthlyFee||0).toFixed(0)}/mo</div><div style={AS.rateChipLbl}>Monthly Fee</div></div>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Section 3: Banking ── */}
+      {section === 3 && (
+        <div>
+          <h2 style={AS.sectionTitle}>Banking Information</h2>
+          <p style={{fontSize:13,color:T.muted,marginBottom:20}}>This account will be used for daily settlement of your processing volume.</p>
+          <div style={AS.grid}>
+            {field("Bank Name",banking,setBanking,"bankName","e.g. Chase Bank",undefined,undefined,2)}
+            {field("Account Type",banking,setBanking,"accountType","",undefined,[{v:"checking",l:"Checking"},{v:"savings",l:"Savings"}])}
+            <div/>
+            {field("Routing Number",banking,setBanking,"routingNumber","9-digit routing number")}
+            {field("Account Number",banking,setBanking,"accountNumber","Account number","password")}
+            {field("Confirm Account Number",banking,setBanking,"accountConfirm","Re-enter account number","password")}
+          </div>
+          {banking.accountNumber && banking.accountConfirm && banking.accountNumber !== banking.accountConfirm && (
+            <div style={{marginTop:12,padding:"10px 14px",background:"#fef2f2",border:"1px solid #fecaca",borderRadius:8,fontSize:13,color:"#ef4444"}}>
+              Account numbers do not match.
+            </div>
+          )}
+          <div style={{marginTop:20,padding:"14px 18px",background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:10,fontSize:13,color:"#1e40af",lineHeight:1.6}}>
+            🔒 Banking information is stored securely. We use bank-level 256-bit encryption and never share your account details with third parties.
+          </div>
+        </div>
+      )}
+
+      {/* ── Section 4: Agreement ── */}
+      {section === 4 && (
+        <div>
+          <h2 style={AS.sectionTitle}>Agreement & Signature</h2>
+          <div style={{background:"#0f1628",border:"1px solid #1e2d45",borderRadius:12,padding:"20px 24px",marginBottom:24,maxHeight:200,overflowY:"auto",fontSize:12,color:T.muted,lineHeight:1.8}}>
+            <strong style={{color:"#e2e8f0"}}>AIO Payment Processing Agreement — Summary of Terms</strong><br/><br/>
+            By submitting this application, the applicant ("Merchant") agrees to the AIO Merchant Processing Agreement ("Agreement"), the terms of which are incorporated herein by reference. The Merchant agrees to process all eligible transactions through AIO's payment processing platform at the rates disclosed in Section 3 of this application. AIO reserves the right to withhold settlement funds in cases of suspected fraud, chargebacks exceeding applicable thresholds, or material misrepresentation on this application. The Merchant acknowledges that interchange fees are set by Visa, Mastercard, and other card networks and are subject to change. AIO will provide 30 days notice of any rate changes except where prohibited by network regulations. The Merchant grants AIO authorization to debit the settlement account for processing fees, chargebacks, and adjustments as detailed in the Agreement. This application constitutes an offer to enter into the Agreement and does not obligate AIO to approve or provide processing services.
+          </div>
+          <div style={AS.grid}>
+            {field("Full Legal Name (Signature)",agreement,setAgreement,"sigName","Type your full name",undefined,undefined,2)}
+            {field("Date",agreement,setAgreement,"sigDate","","date")}
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:14,marginTop:20}}>
+            {[
+              {key:"termsAccepted",label:"I have read and agree to the AIO Merchant Processing Agreement and all associated terms and conditions."},
+              {key:"electronicConsentAccepted",label:"I consent to the use of electronic records and signatures in connection with this agreement."},
+            ].map(c=>(
+              <label key={c.key} style={{display:"flex",alignItems:"flex-start",gap:12,cursor:"pointer"}}>
+                <input type="checkbox" checked={agreement[c.key]}
+                  onChange={e=>setAgreement(p=>({...p,[c.key]:e.target.checked}))}
+                  style={{marginTop:2,width:16,height:16,accentColor:"#0ea5e9",flexShrink:0}}/>
+                <span style={{fontSize:13,color:T.muted,lineHeight:1.6}}>{c.label}</span>
+              </label>
+            ))}
+          </div>
+          {/* Summary card */}
+          <div style={{marginTop:28,background:"#052e16",border:`1px solid ${T.green}40`,borderRadius:12,padding:"20px 24px"}}>
+            <div style={{fontSize:12,color:T.green,fontWeight:700,letterSpacing:.5,textTransform:"uppercase",marginBottom:14}}>Application Summary</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              {[
+                {l:"Business",v:biz.dba||biz.legalName||"—"},
+                {l:"Owner",v:`${owner.firstName} ${owner.lastName}`.trim()||"—"},
+                {l:"Monthly Volume",v:fmt$(Number(processing.monthlyVolume)||0)},
+                {l:"Pricing Model",v:proposal.pricingModel},
+                {l:"Annual Savings",v:fmt$(savingsAnnual)},
+                {l:"Settlement Account",v:banking.bankName||"—"},
+              ].map(r=>(
+                <div key={r.l}>
+                  <div style={{fontSize:11,color:T.muted,marginBottom:2}}>{r.l}</div>
+                  <div style={{fontSize:13,fontWeight:600,color:"#e2e8f0",textTransform:"capitalize"}}>{r.v}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Nav buttons */}
+      <div style={{...S.btnRow, marginTop:36}}>
+        <button style={{...S.btn,...S.btnSecondary}} onClick={()=>section>0?setSection(section-1):onBack()}>
+          ← {section>0?"Previous":"Back to Proposal"}
+        </button>
+        {section < sections.length-1 ? (
+          <button style={{...S.btn,...S.btnPrimary}} onClick={()=>setSection(section+1)}>
+            Continue → {sections[section+1].title}
+          </button>
+        ) : (
+          <button
+            disabled={!agreement.termsAccepted||!agreement.electronicConsentAccepted||!agreement.sigName.trim()}
+            style={{...S.btn,...S.btnPrimary,opacity:(agreement.termsAccepted&&agreement.electronicConsentAccepted&&agreement.sigName.trim())?1:0.4,
+              background:"linear-gradient(135deg,#22c55e,#16a34a)",boxShadow:"0 6px 20px rgba(34,197,94,0.3)"}}
+            onClick={handleSubmit}>
+            ✓ Submit Application
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Apply Step styles
+const AS = {
+  sectionTitle: { fontSize:18, fontWeight:800, color:"#e2e8f0", marginBottom:20, paddingBottom:12, borderBottom:"1px solid #1e2d45" },
+  grid: { display:"grid", gridTemplateColumns:"1fr 1fr", gap:16, marginBottom:8 },
+  label: { display:"block", fontSize:12, fontWeight:600, color:"#94a3b8", marginBottom:6, letterSpacing:.3 },
+  input: { width:"100%", padding:"11px 14px", borderRadius:8, border:"1.5px solid #1e2d45", background:"#0a0f1e", color:"#e2e8f0", fontSize:14, outline:"none", fontFamily:"inherit" },
+  rateChip: { background:"#0a0f1e", border:"1px solid #1e2d45", borderRadius:10, padding:"12px 16px", textAlign:"center", minWidth:100 },
+  rateChipVal: { fontSize:18, fontWeight:800, color:"#0ea5e9", marginBottom:4 },
+  rateChipLbl: { fontSize:11, color:"#64748b", textTransform:"uppercase", letterSpacing:.5 },
+};
 
 // ─── Print / Export ───────────────────────────────────────────────────────────
 function printProposal(proposal, analysis, activeTier, activeProcessor, targetMargin, netMargin, fmtPct2, fmt$) {
