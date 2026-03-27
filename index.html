@@ -1242,187 +1242,168 @@ const AS = {
 
 // ─── Generate Customer Proposal (opens new tab with self-contained HTML) ──────
 function printProposal(proposal, analysis, activeTier, activeProcessor, targetMargin, netMargin, fmtPct2, fmt$) {
-  const safeName = (analysis.merchantName || 'Merchant').replace(/[^a-zA-Z0-9]/g, '-');
-  const dateStr  = new Date().toISOString().slice(0, 10);
-  const fileName = 'AIO-Proposal-' + safeName + '-' + dateStr + '.pdf';
-  const vol = analysis.totalVolume || 1;
-  const currentEffRate = (analysis.totalFees || 0) / vol;
-  const proposedEffRate = (proposal.projectedFees?.monthly || 0) / vol;
-  const savingsMonthly = (analysis.totalFees || 0) - (proposal.projectedFees?.monthly || 0);
-  const savingsAnnual = savingsMonthly * 12;
-  const savingsPct = analysis.totalFees > 0 ? savingsMonthly / analysis.totalFees : 0;
+  // All string building uses concatenation only — zero template literals to avoid
+  // Babel standalone crashing on nested backtick depth.
+  var safeName      = (analysis.merchantName || 'Merchant').replace(/[^a-zA-Z0-9]/g, '-');
+  var dateStr       = new Date().toISOString().slice(0, 10);
+  var fileName      = 'AIO-Proposal-' + safeName + '-' + dateStr + '.pdf';
+  var preparedDate  = new Date().toLocaleDateString('en-US', {year:'numeric', month:'long', day:'numeric'});
+  var merchantName  = analysis.merchantName || 'Merchant';
+  var vol           = analysis.totalVolume || 1;
+  var currentEffRate  = (analysis.totalFees || 0) / vol;
+  var proposedMonthly = (proposal.projectedFees && proposal.projectedFees.monthly) || 0;
+  var proposedEffRate = proposedMonthly / vol;
+  var savingsMonthly  = (analysis.totalFees || 0) - proposedMonthly;
+  var savingsAnnual   = savingsMonthly * 12;
+  var savingsPct      = analysis.totalFees > 0 ? savingsMonthly / analysis.totalFees : 0;
+  var pricingLabel    = proposal.pricingModel === 'flat-rate' ? 'Flat Rate' : proposal.pricingModel === '2-tier' ? '2-Tier' : 'Interchange Plus';
+  var rates           = proposal.proposedRates || {};
 
-  // Pre-compute key value points HTML to avoid nested template literals inside html template
-  const keyValuePointsHtml = [
+  // Monthly fee card (optional)
+  var mfCard = (rates.monthlyFee || 0) > 0
+    ? '<div class="rate-card"><div class="rate-lbl">Monthly Fee</div><div class="rate-val">' + fmt$(rates.monthlyFee) + '</div><div class="rate-sub">service fee</div></div>'
+    : '';
+
+  // Rates section
+  var ratesHtml;
+  if (proposal.pricingModel === 'flat-rate') {
+    ratesHtml = '<div class="rate-card"><div class="rate-lbl">All Cards</div><div class="rate-val">' + fmtPct2(rates.flatRate || 0) + '</div><div class="rate-sub">single flat rate</div></div>'
+      + '<div class="rate-card"><div class="rate-lbl">Per Transaction</div><div class="rate-val">$' + (rates.perTransaction || 0).toFixed(2) + '</div><div class="rate-sub">auth fee</div></div>'
+      + mfCard;
+  } else if (proposal.pricingModel === '2-tier') {
+    ratesHtml = '<div class="rate-card"><div class="rate-lbl">Card Present</div><div class="rate-val">' + fmtPct2(rates.cardPresentRate || 0) + '</div><div class="rate-sub">+ $' + (rates.cardPresentPerTxn || 0).toFixed(2) + '/txn</div></div>'
+      + '<div class="rate-card"><div class="rate-lbl">Card Not Present</div><div class="rate-val">' + fmtPct2(rates.cardNotPresentRate || 0) + '</div><div class="rate-sub">+ $' + (rates.cardNotPresentPerTxn || 0).toFixed(2) + '/txn</div></div>'
+      + mfCard;
+  } else {
+    ratesHtml = '<div class="rate-card"><div class="rate-lbl">Markup</div><div class="rate-val">' + (rates.basisPoints || 0) + ' BPS</div><div class="rate-sub">above interchange</div></div>'
+      + '<div class="rate-card"><div class="rate-lbl">Per Transaction</div><div class="rate-val">$' + (rates.perTransaction || 0).toFixed(2) + '</div><div class="rate-sub">auth fee</div></div>'
+      + mfCard;
+  }
+
+  // Key value points
+  var vpItems = [
     'One platform for payments, POS, and operations\u2014no more disconnected systems',
     'Clear, predictable pricing with immediate annual savings of ' + fmt$(savingsAnnual),
     'Real-time visibility into sales, costs, and performance across your business',
     'Less manual work for your team through automation and AI-powered workflows'
-  ].map(function(p, i) {
-    return '<div class="vp"><span class="vp-num">' + String(i+1).padStart(2,'0') + '</span><span>' + p + '</span></div>';
-  }).join('');
+  ];
+  var kvHtml = '';
+  for (var ki = 0; ki < vpItems.length; ki++) {
+    kvHtml += '<div class="vp"><span class="vp-num">' + String(ki+1).padStart(2,'0') + '</span><span>' + vpItems[ki] + '</span></div>';
+  }
 
-  const ratesHtml = proposal.pricingModel === "flat-rate" ? `
-    <div class="rate-card"><div class="rate-lbl">All Cards</div><div class="rate-val">${fmtPct2(proposal.proposedRates?.flatRate||0)}</div><div class="rate-sub">single flat rate</div></div>
-    <div class="rate-card"><div class="rate-lbl">Per Transaction</div><div class="rate-val">${(proposal.proposedRates?.perTransaction||0).toFixed(2)}</div><div class="rate-sub">auth fee</div></div>
-    ${(proposal.proposedRates?.monthlyFee||0)>0?`<div class="rate-card"><div class="rate-lbl">Monthly Fee</div><div class="rate-val">${fmt$(proposal.proposedRates?.monthlyFee)}</div><div class="rate-sub">service fee</div></div>`:''}
-  ` : proposal.pricingModel === "2-tier" ? `
-    <div class="rate-card"><div class="rate-lbl">Card Present</div><div class="rate-val">${fmtPct2(proposal.proposedRates?.cardPresentRate||0)}</div><div class="rate-sub">+ ${(proposal.proposedRates?.cardPresentPerTxn||0).toFixed(2)}/txn</div></div>
-    <div class="rate-card"><div class="rate-lbl">Card Not Present</div><div class="rate-val">${fmtPct2(proposal.proposedRates?.cardNotPresentRate||0)}</div><div class="rate-sub">+ ${(proposal.proposedRates?.cardNotPresentPerTxn||0).toFixed(2)}/txn</div></div>
-    ${(proposal.proposedRates?.monthlyFee||0)>0?`<div class="rate-card"><div class="rate-lbl">Monthly Fee</div><div class="rate-val">${fmt$(proposal.proposedRates?.monthlyFee)}</div><div class="rate-sub">service fee</div></div>`:''}
-  ` : `
-    <div class="rate-card"><div class="rate-lbl">Markup</div><div class="rate-val">${proposal.proposedRates?.basisPoints||0} BPS</div><div class="rate-sub">above interchange</div></div>
-    <div class="rate-card"><div class="rate-lbl">Per Transaction</div><div class="rate-val">${(proposal.proposedRates?.perTransaction||0).toFixed(2)}</div><div class="rate-sub">auth fee</div></div>
-    ${(proposal.proposedRates?.monthlyFee||0)>0?`<div class="rate-card"><div class="rate-lbl">Monthly Fee</div><div class="rate-val">${fmt$(proposal.proposedRates?.monthlyFee)}</div><div class="rate-sub">service fee</div></div>`:''}
-  `;
+  // Inline script for export (escaped closing tag to prevent early termination)
+  var exportScript = '<scr' + 'ipt src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"><\/scr' + 'ipt>'
+    + '<scr' + 'ipt>'
+    + 'function exportPDF(){'
+    + 'var wrap=document.getElementById("pdf-btn-wrap");'
+    + 'var btn=document.getElementById("pdf-btn");'
+    + 'wrap.style.visibility="hidden";btn.disabled=true;'
+    + 'html2pdf().set({margin:[10,10,10,10],filename:"' + fileName + '",'
+    + 'image:{type:"jpeg",quality:0.98},'
+    + 'html2canvas:{scale:2,useCORS:true,logging:false,backgroundColor:"#ffffff"},'
+    + 'jsPDF:{unit:"mm",format:"letter",orientation:"portrait"}})'
+    + '.from(document.body).save().then(function(){'
+    + 'wrap.style.visibility="visible";btn.disabled=false;});}'
+    + '<\/scr' + 'ipt>';
 
-  const html = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8"/>
-  <title>AIO Proposal — ${analysis.merchantName||'Merchant'}</title>
-  <style>
-    *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:'Helvetica Neue',Arial,sans-serif;color:#1a1a1a;background:#fff;padding:48px;font-size:14px;line-height:1.5}
-    .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:40px;padding-bottom:24px;border-bottom:2px solid #e8614a}
-    .logo{display:flex;align-items:center;gap:10px}
-    .logo-text{font-size:22px;font-weight:800;letter-spacing:2px;color:#1a1a1a}
-    .logo-sub{font-size:11px;color:#888;letter-spacing:3px;text-transform:uppercase}
-    .date{font-size:12px;color:#888}
-    .merchant-name{font-size:36px;font-weight:800;color:#1a1a1a;margin-bottom:6px}
-    .proposal-badge{display:inline-block;background:#e8614a;color:#fff;font-size:10px;letter-spacing:3px;padding:4px 14px;border-radius:20px;margin-bottom:12px}
-    .summary{font-size:15px;color:#555;margin-bottom:40px;max-width:600px;line-height:1.7}
-    .savings-box{background:#f0faf4;border:1.5px solid #22c55e;border-radius:12px;padding:28px 32px;display:flex;gap:40px;align-items:center;margin-bottom:36px}
-    .savings-big{font-size:48px;font-weight:900;color:#16a34a;line-height:1}
-    .savings-lbl{font-size:11px;color:#16a34a;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px}
-    .savings-pct{font-size:13px;color:#4ade80;margin-top:6px}
-    .savings-stats{display:flex;gap:28px;align-items:center}
-    .stat{text-align:center}
-    .stat-val{font-size:20px;font-weight:700;color:#1a1a1a}
-    .stat-lbl{font-size:11px;color:#888;margin-top:3px}
-    .divider{width:1px;height:36px;background:#ccc}
-    h2{font-size:11px;font-weight:700;color:#888;letter-spacing:2px;text-transform:uppercase;margin:0 0 14px}
-    .section{margin-bottom:36px}
-    .rates-grid{display:flex;gap:14px;flex-wrap:wrap}
-    .rate-card{background:#f7f7f7;border-radius:8px;padding:18px 20px;min-width:140px;text-align:center}
-    .rate-lbl{font-size:10px;color:#888;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px}
-    .rate-val{font-size:26px;font-weight:800;color:#e8614a}
-    .rate-sub{font-size:11px;color:#888;margin-top:5px}
-    table{width:100%;border-collapse:collapse}
-    th{text-align:left;font-size:11px;color:#888;letter-spacing:1px;text-transform:uppercase;padding:10px 16px;background:#f7f7f7}
-    td{padding:12px 16px;border-bottom:1px solid #eee;font-size:14px}
-    .red{color:#dc2626;font-weight:600}
-    .blue{color:#2563eb;font-weight:600}
-    .green{color:#16a34a;font-weight:700}
-    .vp-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-    .vp{background:#f7f7f7;border-radius:8px;padding:14px 16px;display:flex;gap:12px;align-items:flex-start}
-    .vp-num{font-size:18px;font-weight:800;color:#e8614a;opacity:0.5;flex-shrink:0}
-    .footer{margin-top:48px;padding-top:20px;border-top:1px solid #eee;font-size:11px;color:#aaa;display:flex;justify-content:space-between}
-    @media print{body{padding:32px}@page{margin:0.5in;size:A4}}
-  </style>
-</head>
-<body>
-  <div class="header">
-    <div class="logo">
-      <svg width="48" height="30" viewBox="0 0 52 32" fill="none">
-        <path d="M2 26 L11 4 L20 26" stroke="#e8614a" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-        <rect x="25" y="13" width="4.5" height="14" rx="2.25" fill="#e8614a"/>
-        <circle cx="27.25" cy="6" r="2.8" fill="#e8614a"/>
-        <rect x="33.5" y="12" width="16" height="15" rx="5.5" stroke="#e8614a" stroke-width="4.5" fill="none"/>
-      </svg>
-      <div><div class="logo-text">AIO</div><div class="logo-sub">Proposal Engine</div></div>
-    </div>
-    <div class="date">Prepared ${new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'})}</div>
-  </div>
+  var html = '<!DOCTYPE html><html><head><meta charset="UTF-8"/>'
+    + '<title>AIO Proposal \u2014 ' + merchantName + '</title>'
+    + '<style>'
+    + '*{box-sizing:border-box;margin:0;padding:0}'
+    + 'body{font-family:Helvetica Neue,Arial,sans-serif;color:#1a1a1a;background:#fff;padding:48px;font-size:14px;line-height:1.5}'
+    + '.header{display:flex;align-items:center;justify-content:space-between;margin-bottom:40px;padding-bottom:24px;border-bottom:2px solid #e8614a}'
+    + '.logo{display:flex;align-items:center;gap:10px}'
+    + '.logo-text{font-size:22px;font-weight:800;letter-spacing:2px;color:#1a1a1a}'
+    + '.logo-sub{font-size:11px;color:#888;letter-spacing:3px;text-transform:uppercase}'
+    + '.date{font-size:12px;color:#888}'
+    + '.merchant-name{font-size:36px;font-weight:800;color:#1a1a1a;margin-bottom:6px}'
+    + '.proposal-badge{display:inline-block;background:#e8614a;color:#fff;font-size:10px;letter-spacing:3px;padding:4px 14px;border-radius:20px;margin-bottom:12px}'
+    + '.summary{font-size:15px;color:#555;margin-bottom:40px;max-width:600px;line-height:1.7}'
+    + '.savings-box{background:#f0faf4;border:1.5px solid #22c55e;border-radius:12px;padding:28px 32px;display:flex;gap:40px;align-items:center;margin-bottom:36px}'
+    + '.savings-big{font-size:48px;font-weight:900;color:#16a34a;line-height:1}'
+    + '.savings-lbl{font-size:11px;color:#16a34a;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px}'
+    + '.savings-pct{font-size:13px;color:#4ade80;margin-top:6px}'
+    + '.savings-stats{display:flex;gap:28px;align-items:center}'
+    + '.stat{text-align:center}'
+    + '.stat-val{font-size:20px;font-weight:700;color:#1a1a1a}'
+    + '.stat-lbl{font-size:11px;color:#888;margin-top:3px}'
+    + '.divider{width:1px;height:36px;background:#ccc}'
+    + 'h2{font-size:11px;font-weight:700;color:#888;letter-spacing:2px;text-transform:uppercase;margin:0 0 14px}'
+    + '.section{margin-bottom:36px}'
+    + '.rates-grid{display:flex;gap:14px;flex-wrap:wrap}'
+    + '.rate-card{background:#f7f7f7;border-radius:8px;padding:18px 20px;min-width:140px;text-align:center}'
+    + '.rate-lbl{font-size:10px;color:#888;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px}'
+    + '.rate-val{font-size:26px;font-weight:800;color:#e8614a}'
+    + '.rate-sub{font-size:11px;color:#888;margin-top:5px}'
+    + 'table{width:100%;border-collapse:collapse}'
+    + 'th{text-align:left;font-size:11px;color:#888;letter-spacing:1px;text-transform:uppercase;padding:10px 16px;background:#f7f7f7}'
+    + 'td{padding:12px 16px;border-bottom:1px solid #eee;font-size:14px}'
+    + '.red{color:#dc2626;font-weight:600}'
+    + '.blue{color:#2563eb;font-weight:600}'
+    + '.green{color:#16a34a;font-weight:700}'
+    + '.vp-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}'
+    + '.vp{background:#f7f7f7;border-radius:8px;padding:14px 16px;display:flex;gap:12px;align-items:flex-start}'
+    + '.vp-num{font-size:18px;font-weight:800;color:#e8614a;opacity:0.5;flex-shrink:0}'
+    + '.footer{margin-top:48px;padding-top:20px;border-top:1px solid #eee;font-size:11px;color:#aaa;display:flex;justify-content:space-between}'
+    + '@media print{body{padding:32px}@page{margin:0.5in;size:A4}}'
+    + '</style></head><body>'
+    // Header
+    + '<div class="header"><div class="logo">'
+    + '<svg width="48" height="30" viewBox="0 0 52 32" fill="none">'
+    + '<path d="M2 26 L11 4 L20 26" stroke="#e8614a" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>'
+    + '<rect x="25" y="13" width="4.5" height="14" rx="2.25" fill="#e8614a"/>'
+    + '<circle cx="27.25" cy="6" r="2.8" fill="#e8614a"/>'
+    + '<rect x="33.5" y="12" width="16" height="15" rx="5.5" stroke="#e8614a" stroke-width="4.5" fill="none"/>'
+    + '</svg>'
+    + '<div><div class="logo-text">AIO</div><div class="logo-sub">Proposal Engine</div></div>'
+    + '</div><div class="date">Prepared ' + preparedDate + '</div></div>'
+    // Merchant name & summary
+    + '<div class="proposal-badge">MERCHANT PROPOSAL</div>'
+    + '<div class="merchant-name">' + merchantName + '</div>'
+    + '<div class="summary">' + (proposal.proposalSummary || '') + '</div>'
+    // Savings box
+    + '<div class="savings-box"><div>'
+    + '<div class="savings-lbl">Annual Savings</div>'
+    + '<div class="savings-big">' + fmt$(savingsAnnual) + '</div>'
+    + '<div class="savings-pct">' + fmtPct2(Math.abs(savingsPct)) + ' reduction in processing costs</div>'
+    + '</div><div class="savings-stats">'
+    + '<div class="stat"><div class="stat-val">' + fmt$(savingsMonthly) + '</div><div class="stat-lbl">Monthly Savings</div></div>'
+    + '<div class="divider"></div>'
+    + '<div class="stat"><div class="stat-val">' + fmtPct2(proposedEffRate) + '</div><div class="stat-lbl">New Effective Rate</div></div>'
+    + '<div class="divider"></div>'
+    + '<div class="stat"><div class="stat-val">' + fmtPct2(currentEffRate) + '</div><div class="stat-lbl">Current Rate</div></div>'
+    + '</div></div>'
+    // Platform blurb
+    + '<div style="padding:14px 20px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;margin-bottom:28px;font-size:13px;color:#64748b;line-height:1.7;text-align:center;">'
+    + 'Payments are just one part of the system\u2014AIO connects your POS, ordering, staffing, and back-office tools into a single platform, reducing manual work and giving you a clearer view of your business.'
+    + '</div>'
+    // Pricing rates
+    + '<div class="section"><h2>Proposed ' + pricingLabel + ' Pricing</h2>'
+    + '<div class="rates-grid">' + ratesHtml + '</div></div>'
+    // Fee comparison table
+    + '<div class="section"><h2>Fee Comparison</h2>'
+    + '<table><thead><tr><th>Category</th><th>Current</th><th>Proposed</th><th>Savings</th></tr></thead><tbody>'
+    + '<tr><td>Monthly Processing Fees</td><td class="red">' + fmt$(analysis.totalFees) + '</td><td class="blue">' + fmt$(proposedMonthly) + '</td><td class="green">' + fmt$(savingsMonthly) + '</td></tr>'
+    + '<tr><td>Annual Processing Fees</td><td class="red">' + fmt$((analysis.totalFees||0)*12) + '</td><td class="blue">' + fmt$(proposedMonthly*12) + '</td><td class="green">' + fmt$(savingsAnnual) + '</td></tr>'
+    + '<tr><td>Effective Rate</td><td class="red">' + fmtPct2(currentEffRate) + '</td><td class="blue">' + fmtPct2(proposedEffRate) + '</td><td class="green">' + fmtPct2(currentEffRate - proposedEffRate) + '</td></tr>'
+    + '</tbody></table></div>'
+    // Key value points
+    + '<div class="section"><h2>Key Value Points</h2>'
+    + '<div class="vp-grid">' + kvHtml + '</div></div>'
+    // Footer
+    + '<div class="footer"><span>AIO \u2014 AI for Restaurants</span><span>aioapp.com</span></div>'
+    // Floating PDF button
+    + '<div id="pdf-btn-wrap" style="position:fixed;top:20px;right:20px;z-index:9999;">'
+    + '<button id="pdf-btn" onclick="exportPDF()" style="background:#e8614a;color:#fff;border:none;border-radius:8px;padding:11px 22px;font-size:14px;font-weight:700;cursor:pointer;box-shadow:0 4px 16px rgba(232,97,74,0.35);">'
+    + '\u2b07\u00a0Export as PDF</button></div>'
+    + exportScript
+    + '</body></html>';
 
-  <div class="proposal-badge">MERCHANT PROPOSAL</div>
-  <div class="merchant-name">${analysis.merchantName||'Merchant'}</div>
-  <div class="summary">${proposal.proposalSummary||''}</div>
-
-  <div class="savings-box">
-    <div>
-      <div class="savings-lbl">Annual Savings</div>
-      <div class="savings-big">${fmt$(savingsAnnual)}</div>
-      <div class="savings-pct">${fmtPct2(Math.abs(savingsPct))} reduction in processing costs</div>
-    </div>
-    <div class="savings-stats">
-      <div class="stat"><div class="stat-val">${fmt$(savingsMonthly)}</div><div class="stat-lbl">Monthly Savings</div></div>
-      <div class="divider"></div>
-      <div class="stat"><div class="stat-val">${fmtPct2(proposedEffRate)}</div><div class="stat-lbl">New Effective Rate</div></div>
-      <div class="divider"></div>
-      <div class="stat"><div class="stat-val">${fmtPct2(currentEffRate)}</div><div class="stat-lbl">Current Rate</div></div>
-    </div>
-  </div>
-
-  <div style="padding:14px 20px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;margin-bottom:28px;font-size:13px;color:#64748b;line-height:1.7;text-align:center;">
-    Payments are just one part of the system—AIO connects your POS, ordering, staffing, and back-office tools into a single platform, reducing manual work and giving you a clearer view of your business.
-  </div>
-
-  <div class="section">
-    <h2>Proposed ${proposal.pricingModel === 'flat-rate' ? 'Flat Rate' : proposal.pricingModel === '2-tier' ? '2-Tier' : 'Interchange Plus'} Pricing</h2>
-    <div class="rates-grid">${ratesHtml}</div>
-  </div>
-
-  <div class="section">
-    <h2>Fee Comparison</h2>
-    <table>
-      <thead><tr><th>Category</th><th>Current</th><th>Proposed</th><th>Savings</th></tr></thead>
-      <tbody>
-        <tr><td>Monthly Processing Fees</td><td class="red">${fmt$(analysis.totalFees)}</td><td class="blue">${fmt$(proposal.projectedFees?.monthly||0)}</td><td class="green">${fmt$(savingsMonthly)}</td></tr>
-        <tr><td>Annual Processing Fees</td><td class="red">${fmt$((analysis.totalFees||0)*12)}</td><td class="blue">${fmt$((proposal.projectedFees?.monthly||0)*12)}</td><td class="green">${fmt$(savingsAnnual)}</td></tr>
-        <tr><td>Effective Rate</td><td class="red">${fmtPct2(currentEffRate)}</td><td class="blue">${fmtPct2(proposedEffRate)}</td><td class="green">${fmtPct2(currentEffRate-proposedEffRate)}</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <div class="section">
-    <h2>Key Value Points</h2>
-    <div class="vp-grid">
-      ${keyValuePointsHtml}
-    </div>
-  </div>
-
-  <div class="footer">
-    <span>AIO — AI for Restaurants</span>
-    <span>aioapp.com</span>
-  </div>
-
-  <!-- Floating Export to PDF button -->
-  <div id="pdf-btn-wrap" style="position:fixed;top:20px;right:20px;z-index:9999;display:flex;gap:10px;align-items:center">
-    <button id="pdf-btn" onclick="exportPDF()" style="background:#e8614a;color:#fff;border:none;border-radius:8px;padding:11px 22px;font-size:14px;font-weight:700;cursor:pointer;box-shadow:0 4px 16px rgba(232,97,74,0.35);font-family:Helvetica Neue,Arial,sans-serif">
-      ⬇&nbsp;Export as PDF
-    </button>
-  </div>
-
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
-  <script>
-    function exportPDF() {
-      var wrap = document.getElementById('pdf-btn-wrap');
-      var btn  = document.getElementById('pdf-btn');
-      wrap.style.visibility = 'hidden';
-      btn.disabled = true;
-      var fileName = '${fileName}';
-      html2pdf().set({
-        margin:      [10,10,10,10],
-        filename:    fileName,
-        image:       {type:'jpeg',quality:0.98},
-        html2canvas: {scale:2,useCORS:true,logging:false,backgroundColor:'#ffffff'},
-        jsPDF:       {unit:'mm',format:'letter',orientation:'portrait'}
-      }).from(document.body).save().then(function(){
-        wrap.style.visibility = 'visible';
-        btn.disabled = false;
-      });
-    }
-  </script>
-
-</body>
-</html>`;
-
-  // Open the proposal in a new tab — the page includes its own Export to PDF button
-  const blob = new Blob([html], { type: 'text/html' });
-  const url  = URL.createObjectURL(blob);
+  var blob = new Blob([html], { type: 'text/html' });
+  var url  = URL.createObjectURL(blob);
   window.open(url, '_blank');
-  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  setTimeout(function() { URL.revokeObjectURL(url); }, 60000);
 }
 
 // ─── Pricing Step Component ───────────────────────────────────────────────────
