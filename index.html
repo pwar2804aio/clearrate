@@ -1252,6 +1252,16 @@ function printProposal(proposal, analysis, activeTier, activeProcessor, targetMa
   const savingsAnnual = savingsMonthly * 12;
   const savingsPct = analysis.totalFees > 0 ? savingsMonthly / analysis.totalFees : 0;
 
+  // Pre-compute key value points HTML to avoid nested template literals inside html template
+  const keyValuePointsHtml = [
+    'One platform for payments, POS, and operations\u2014no more disconnected systems',
+    'Clear, predictable pricing with immediate annual savings of ' + fmt$(savingsAnnual),
+    'Real-time visibility into sales, costs, and performance across your business',
+    'Less manual work for your team through automation and AI-powered workflows'
+  ].map(function(p, i) {
+    return '<div class="vp"><span class="vp-num">' + String(i+1).padStart(2,'0') + '</span><span>' + p + '</span></div>';
+  }).join('');
+
   const ratesHtml = proposal.pricingModel === "flat-rate" ? `
     <div class="rate-card"><div class="rate-lbl">All Cards</div><div class="rate-val">${fmtPct2(proposal.proposedRates?.flatRate||0)}</div><div class="rate-sub">single flat rate</div></div>
     <div class="rate-card"><div class="rate-lbl">Per Transaction</div><div class="rate-val">${(proposal.proposedRates?.perTransaction||0).toFixed(2)}</div><div class="rate-sub">auth fee</div></div>
@@ -1368,12 +1378,7 @@ function printProposal(proposal, analysis, activeTier, activeProcessor, targetMa
   <div class="section">
     <h2>Key Value Points</h2>
     <div class="vp-grid">
-      ${[
-        "One platform for payments, POS, and operations—no more disconnected systems",
-        `Clear, predictable pricing with immediate annual savings of ${fmt$(savingsAnnual)}`,
-        "Real-time visibility into sales, costs, and performance across your business",
-        "Less manual work for your team through automation and AI-powered workflows"
-      ].map((p,i)=>`<div class="vp"><span class="vp-num">${String(i+1).padStart(2,'0')}</span><span>${p}</span></div>`).join('')}
+      ${keyValuePointsHtml}
     </div>
   </div>
 
