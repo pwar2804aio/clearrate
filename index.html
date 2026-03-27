@@ -567,7 +567,7 @@ Return ONLY JSON (no markdown, all rate fields as decimals e.g. 0.0272 not 2.72)
                 <div style={S.highlightBox}>
                   <div style={S.hlLeft}>
                     <div style={S.hlTitle}>Total Margin Opportunity Above Interchange & Acquirer</div>
-                    <div style={S.hlValue}>{fmtPct2((analysis.currentMargin||0)+((analysis.otherFees||0)/(analysis.totalVolume||1)))}</div>
+                    <div style={S.hlValue}>{fmtPct2(analysis.currentMargin||0)}</div>
                     <div style={S.hlSub}>Everything the merchant pays above hard costs</div>
                   </div>
                   <div style={S.hlRight}>
