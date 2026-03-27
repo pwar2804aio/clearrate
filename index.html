@@ -564,24 +564,17 @@ Return ONLY JSON (no markdown, all rate fields as decimals e.g. 0.0272 not 2.72)
                   )}
                 </div>
 
-                {(()=>{
-                  const hlAdyenCost  = activeTier ? calcAdyenCost(activeTier, analysis.totalVolume||0, analysis.totalTransactions||0) : 0;
-                  const hlNet        = Math.max(0, (analysis.processorFees||0) - hlAdyenCost + (analysis.otherFees||0));
-                  const hlNetRate    = hlNet / (analysis.totalVolume||1);
-                  return (
-                    <div style={S.highlightBox}>
-                      <div style={S.hlLeft}>
-                        <div style={S.hlTitle}>Total Margin Opportunity Above Interchange & Acquirer</div>
-                        <div style={S.hlValue}>{fmtPct2(hlNetRate)}</div>
-                        <div style={S.hlSub}>Everything the merchant pays above hard costs</div>
-                      </div>
-                      <div style={S.hlRight}>
-                        <div style={S.hlStat}><span style={S.hlStatNum}>{fmt$(hlNet)}</span><span style={S.hlStatLbl}>Monthly Opportunity</span></div>
-                        <div style={S.hlStat}><span style={S.hlStatNum}>{fmt$(hlNet*12)}</span><span style={S.hlStatLbl}>Annual Opportunity</span></div>
-                      </div>
-                    </div>
-                  );
-                })()}
+                <div style={S.highlightBox}>
+                  <div style={S.hlLeft}>
+                    <div style={S.hlTitle}>Total Gross Margin Above Interchange</div>
+                    <div style={S.hlValue}>{fmtPct2(analysis.currentMargin||0)}</div>
+                    <div style={S.hlSub}>Everything the merchant pays above interchange, including processor costs</div>
+                  </div>
+                  <div style={S.hlRight}>
+                    <div style={S.hlStat}><span style={S.hlStatNum}>{fmt$((analysis.processorFees||0)+(analysis.otherFees||0))}</span><span style={S.hlStatLbl}>Monthly Gross</span></div>
+                    <div style={S.hlStat}><span style={S.hlStatNum}>{fmt$(((analysis.processorFees||0)+(analysis.otherFees||0))*12)}</span><span style={S.hlStatLbl}>Annual Gross</span></div>
+                  </div>
+                </div>
 
                 <div style={S.section}>
                   <h2 style={S.h2}>Volume Mix</h2>
