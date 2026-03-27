@@ -7,6 +7,7 @@
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #0a0f1e; }
@@ -118,6 +119,7 @@ function App() {
   const [dragOver, setDragOver] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState("");
+  const [exporting, setExporting] = useState(false);
   const fileRef = useRef();
 
   // Load settings on mount
@@ -689,7 +691,9 @@ Return ONLY JSON (no markdown, all rate fields as decimals e.g. 0.0272 not 2.72)
                 </div>
                 <div style={S.btnRow}>
                   <button style={{...S.btn,...S.btnSecondary}} onClick={()=>setStep("pricing")}>← Adjust Pricing</button>
-                  <button style={{...S.btn,...S.btnPrimary}} onClick={()=>printProposal(proposal, analysis, activeTier, activeProcessor, targetMargin, netMargin, fmtPct2, fmt$)}>Print / Export PDF</button>
+                  <button style={{...S.btn,...S.btnPrimary,opacity:exporting?0.7:1,minWidth:160}} disabled={exporting} onClick={async()=>{setExporting(true);try{await printProposal(proposal,analysis,activeTier,activeProcessor,targetMargin,netMargin,fmtPct2,fmt$);}finally{setExporting(false);}}}>
+                    {exporting ? '⏳ Generating PDF…' : '⬇ Export as PDF'}
+                  </button>
                   <button style={{...S.btn,...S.btnGhost}} onClick={()=>{setStep("upload");setFile(null);setFileData(null);setAnalysis(null);setProposal(null);setPricingModel(null);}}>New Proposal</button>
                 </div>
                 {/* Apply CTA */}
@@ -1237,7 +1241,7 @@ const AS = {
 };
 
 // ─── Print / Export ───────────────────────────────────────────────────────────
-function printProposal(proposal, analysis, activeTier, activeProcessor, targetMargin, netMargin, fmtPct2, fmt$) {
+async function printProposal(proposal, analysis, activeTier, activeProcessor, targetMargin, netMargin, fmtPct2, fmt$) {
   const vol = analysis.totalVolume || 1;
   const currentEffRate = (analysis.totalFees || 0) / vol;
   const proposedEffRate = (proposal.projectedFees?.monthly || 0) / vol;
@@ -1375,18 +1379,32 @@ function printProposal(proposal, analysis, activeTier, activeProcessor, targetMa
     <span>aioapp.com</span>
   </div>
 
-  <script>window.onload=()=>window.print();<\/script>
 </body>
 </html>`;
 
-  const blob = new Blob([html], { type: 'text/html' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `AIO-Proposal-${(analysis.merchantName||'Merchant').replace(/\s+/g,'-')}-${new Date().toISOString().slice(0,10)}.html`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
+  // Render in a hidden iframe so all CSS is applied, then export with html2pdf
+  const iframe = document.createElement('iframe');
+  iframe.style.cssText = 'position:fixed;left:-10000px;top:0;width:816px;height:1056px;border:0;visibility:hidden';
+  document.body.appendChild(iframe);
+
+  await new Promise(resolve => {
+    iframe.onload = () => setTimeout(resolve, 400); // let fonts & layout settle
+    iframe.srcdoc = html;
+  });
+
+  const fileName = `AIO-Proposal-${(analysis.merchantName||'Merchant').replace(/[^a-zA-Z0-9]/g,'-')}-${new Date().toISOString().slice(0,10)}.pdf`;
+
+  try {
+    await window.html2pdf().set({
+      margin:     [10, 10, 10, 10],
+      filename:   fileName,
+      image:      { type: 'jpeg', quality: 0.98 },
+      html2canvas:{ scale: 2, useCORS: true, logging: false },
+      jsPDF:      { unit: 'mm', format: 'letter', orientation: 'portrait' }
+    }).from(iframe.contentDocument.body).save();
+  } finally {
+    document.body.removeChild(iframe);
+  }
   URL.revokeObjectURL(url);
 }
 
