@@ -691,8 +691,8 @@ Return ONLY JSON (no markdown, all rate fields as decimals e.g. 0.0272 not 2.72)
                 </div>
                 <div style={S.btnRow}>
                   <button style={{...S.btn,...S.btnSecondary}} onClick={()=>setStep("pricing")}>← Adjust Pricing</button>
-                  <button style={{...S.btn,...S.btnPrimary,opacity:exporting?0.7:1,minWidth:160}} disabled={exporting} onClick={async()=>{setExporting(true);try{await printProposal(proposal,analysis,activeTier,activeProcessor,targetMargin,netMargin,fmtPct2,fmt$);}finally{setExporting(false);}}}>
-                    {exporting ? '⏳ Generating PDF…' : '⬇ Export as PDF'}
+                  <button style={{...S.btn,...S.btnPrimary}} onClick={()=>printProposal(proposal,analysis,activeTier,activeProcessor,targetMargin,netMargin,fmtPct2,fmt$)}>
+                    Generate Customer Proposal
                   </button>
                   <button style={{...S.btn,...S.btnGhost}} onClick={()=>{setStep("upload");setFile(null);setFileData(null);setAnalysis(null);setProposal(null);setPricingModel(null);}}>New Proposal</button>
                 </div>
@@ -1240,8 +1240,8 @@ const AS = {
   rateChipLbl: { fontSize:11, color:"#64748b", textTransform:"uppercase", letterSpacing:.5 },
 };
 
-// ─── Print / Export ───────────────────────────────────────────────────────────
-async function printProposal(proposal, analysis, activeTier, activeProcessor, targetMargin, netMargin, fmtPct2, fmt$) {
+// ─── Generate Customer Proposal (opens new tab with self-contained HTML) ──────
+function printProposal(proposal, analysis, activeTier, activeProcessor, targetMargin, netMargin, fmtPct2, fmt$) {
   const vol = analysis.totalVolume || 1;
   const currentEffRate = (analysis.totalFees || 0) / vol;
   const proposedEffRate = (proposal.projectedFees?.monthly || 0) / vol;
@@ -1379,44 +1379,42 @@ async function printProposal(proposal, analysis, activeTier, activeProcessor, ta
     <span>aioapp.com</span>
   </div>
 
+  <!-- Floating Export to PDF button -->
+  <div id="pdf-btn-wrap" style="position:fixed;top:20px;right:20px;z-index:9999;display:flex;gap:10px;align-items:center">
+    <button id="pdf-btn" onclick="exportPDF()" style="background:#e8614a;color:#fff;border:none;border-radius:8px;padding:11px 22px;font-size:14px;font-weight:700;cursor:pointer;box-shadow:0 4px 16px rgba(232,97,74,0.35);font-family:Helvetica Neue,Arial,sans-serif">
+      ⬇&nbsp;Export as PDF
+    </button>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+  <script>
+    function exportPDF() {
+      var wrap = document.getElementById('pdf-btn-wrap');
+      var btn  = document.getElementById('pdf-btn');
+      wrap.style.visibility = 'hidden';
+      btn.disabled = true;
+      var fileName = 'AIO-Proposal-${(analysis.merchantName||'Merchant').replace(/[^a-zA-Z0-9]/g,'-')}-${new Date().toISOString().slice(0,10)}.pdf';
+      html2pdf().set({
+        margin:      [10,10,10,10],
+        filename:    fileName,
+        image:       {type:'jpeg',quality:0.98},
+        html2canvas: {scale:2,useCORS:true,logging:false,backgroundColor:'#ffffff'},
+        jsPDF:       {unit:'mm',format:'letter',orientation:'portrait'}
+      }).from(document.body).save().then(function(){
+        wrap.style.visibility = 'visible';
+        btn.disabled = false;
+      });
+    }
+  </script>
+
 </body>
 </html>`;
 
-  // Extract CSS and body content from the generated HTML string, then inject
-  // them directly into the current document so html2canvas can render them
-  // without any cross-origin / iframe security restrictions.
-  const cssText    = (html.match(/<style>([\s\S]*?)<\/style>/) || [])[1] || '';
-  const bodyHtml   = (html.match(/<body>([\s\S]*?)<\/body>/)   || [])[1] || html;
-
-  const styleEl    = document.createElement('style');
-  styleEl.id       = '__pdf_export_style__';
-  styleEl.textContent = cssText;
-  document.head.appendChild(styleEl);
-
-  const container  = document.createElement('div');
-  container.id     = '__pdf_export_container__';
-  // Position off-screen at letter width so layout matches the PDF page
-  container.style.cssText = 'position:fixed;left:-10000px;top:0;width:816px;background:#fff;z-index:-9999;font-family:Helvetica Neue,Arial,sans-serif';
-  container.innerHTML = bodyHtml;
-  document.body.appendChild(container);
-
-  // Let the browser paint the injected DOM before html2canvas captures it
-  await new Promise(r => setTimeout(r, 350));
-
-  const fileName = `AIO-Proposal-${(analysis.merchantName||'Merchant').replace(/[^a-zA-Z0-9]/g,'-')}-${new Date().toISOString().slice(0,10)}.pdf`;
-
-  try {
-    await window.html2pdf().set({
-      margin:      [10, 10, 10, 10],
-      filename:    fileName,
-      image:       { type: 'jpeg', quality: 0.98 },
-      html2canvas: { scale: 2, useCORS: true, logging: false, backgroundColor: '#ffffff' },
-      jsPDF:       { unit: 'mm', format: 'letter', orientation: 'portrait' }
-    }).from(container).save();
-  } finally {
-    document.body.removeChild(container);
-    document.head.removeChild(styleEl);
-  }
+  // Open the proposal in a new tab — the page includes its own Export to PDF button
+  const blob = new Blob([html], { type: 'text/html' });
+  const url  = URL.createObjectURL(blob);
+  window.open(url, '_blank');
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
 // ─── Pricing Step Component ───────────────────────────────────────────────────
