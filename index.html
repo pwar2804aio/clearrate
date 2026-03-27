@@ -1382,30 +1382,41 @@ async function printProposal(proposal, analysis, activeTier, activeProcessor, ta
 </body>
 </html>`;
 
-  // Render in a hidden iframe so all CSS is applied, then export with html2pdf
-  const iframe = document.createElement('iframe');
-  iframe.style.cssText = 'position:fixed;left:-10000px;top:0;width:816px;height:1056px;border:0;visibility:hidden';
-  document.body.appendChild(iframe);
+  // Extract CSS and body content from the generated HTML string, then inject
+  // them directly into the current document so html2canvas can render them
+  // without any cross-origin / iframe security restrictions.
+  const cssText    = (html.match(/<style>([\s\S]*?)<\/style>/) || [])[1] || '';
+  const bodyHtml   = (html.match(/<body>([\s\S]*?)<\/body>/)   || [])[1] || html;
 
-  await new Promise(resolve => {
-    iframe.onload = () => setTimeout(resolve, 400); // let fonts & layout settle
-    iframe.srcdoc = html;
-  });
+  const styleEl    = document.createElement('style');
+  styleEl.id       = '__pdf_export_style__';
+  styleEl.textContent = cssText;
+  document.head.appendChild(styleEl);
+
+  const container  = document.createElement('div');
+  container.id     = '__pdf_export_container__';
+  // Position off-screen at letter width so layout matches the PDF page
+  container.style.cssText = 'position:fixed;left:-10000px;top:0;width:816px;background:#fff;z-index:-9999;font-family:Helvetica Neue,Arial,sans-serif';
+  container.innerHTML = bodyHtml;
+  document.body.appendChild(container);
+
+  // Let the browser paint the injected DOM before html2canvas captures it
+  await new Promise(r => setTimeout(r, 350));
 
   const fileName = `AIO-Proposal-${(analysis.merchantName||'Merchant').replace(/[^a-zA-Z0-9]/g,'-')}-${new Date().toISOString().slice(0,10)}.pdf`;
 
   try {
     await window.html2pdf().set({
-      margin:     [10, 10, 10, 10],
-      filename:   fileName,
-      image:      { type: 'jpeg', quality: 0.98 },
-      html2canvas:{ scale: 2, useCORS: true, logging: false },
-      jsPDF:      { unit: 'mm', format: 'letter', orientation: 'portrait' }
-    }).from(iframe.contentDocument.body).save();
+      margin:      [10, 10, 10, 10],
+      filename:    fileName,
+      image:       { type: 'jpeg', quality: 0.98 },
+      html2canvas: { scale: 2, useCORS: true, logging: false, backgroundColor: '#ffffff' },
+      jsPDF:       { unit: 'mm', format: 'letter', orientation: 'portrait' }
+    }).from(container).save();
   } finally {
-    document.body.removeChild(iframe);
+    document.body.removeChild(container);
+    document.head.removeChild(styleEl);
   }
-  URL.revokeObjectURL(url);
 }
 
 // ─── Pricing Step Component ───────────────────────────────────────────────────
